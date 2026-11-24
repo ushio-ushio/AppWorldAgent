@@ -1,0 +1,31 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.dat
+*.pem
+*.key
+
+# AppWorld source, datasets, caches, and generated runs stay outside Git
+data/
+vendor/
+runs/
+.tmp/
+summary.json
+*.log
+
+# Preserve only the frozen public Train task ID list needed by the runner
+reports/*
+!reports/v2_lite_train15_task_ids.json
+
+# Python and test artifacts
+**/__pycache__/
+*.py[cod]
+*.zip
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/

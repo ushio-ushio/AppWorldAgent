@@ -1,0 +1,19 @@
+{
+  "dataset": "train",
+  "model": "gpt-6-luna",
+  "adapter": "official_siwc_responses_oauth",
+  "architecture": "plan_guided_react",
+  "context_mode": "unified",
+  "optimized_unified": true,
+  "schema_aware_retrieval": true,
+  "programmatic_execution": true,
+  "execution_assurance_mode": "shadow",
+  "max_executor_steps": 100,
+  "max_parallel": 5,
+  "task_retry": false,
+  "connect_timeout_seconds": 20,
+  "read_timeout_seconds": 180,
+  "model_post_retry": false,
+  "windows_python_utf8_mode": true,
+  "experiment_prefix": "agentlab_v2_lite_v3_assurance_shadow_train15_"
+}
