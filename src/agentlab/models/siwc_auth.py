@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import secrets
+import time
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 import webbrowser
@@ -64,9 +66,42 @@ class CredentialStore:
 
     def save(self, record: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_bytes(_protect(json.dumps(record).encode("utf-8")))
-        os.replace(temporary, self.path)
+        temporary = self.path.with_name(f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+        try:
+            temporary.write_bytes(_protect(json.dumps(record).encode("utf-8")))
+            os.replace(temporary, self.path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def _credential_refresh_lock(path: Path, timeout_seconds: float = 60):
+    """Serialize refresh-token rotation across Windows worker processes."""
+    import msvcrt
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+        if os.fstat(fd).st_size == 0:
+            lock_file.write(b"\0")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise SIWCError("Timed out waiting for SIWC credential refresh lock") from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _validate_id_token(token: str, client_id: str, nonce: str | None = None) -> dict:
@@ -192,18 +227,27 @@ def access_token(store: CredentialStore | None = None) -> str:
         return record["access_token"]
     if not record.get("refresh_token"):
         raise SIWCError("Refresh token unavailable: sign in again")
-    token = _token_request(dict(grant_type="refresh_token", client_id=record["client_id"],
-                                refresh_token=record["refresh_token"], resource=RESOURCE))
-    claims = _validate_id_token(token["id_token"], record["client_id"]) if token.get("id_token") else None
-    if claims and claims["sub"] != record["subject"]:
-        raise SIWCError("Refreshed account identity changed")
-    scopes = set(token.get("scope", " ".join(record["scopes"])).split())
-    if "chatgpt.tokens.use.direct" not in scopes:
-        raise SIWCError("Refresh removed ChatGPT plan inference permission")
-    record.update(access_token=token["access_token"], refresh_token=token.get("refresh_token", record["refresh_token"]),
-                  scopes=sorted(scopes), expires_at=(datetime.now(timezone.utc) +
-                  timedelta(seconds=int(token.get("expires_in", 3600)))).isoformat())
-    if token.get("id_token"):
-        record["id_token"] = token["id_token"]
-    store.save(record)
-    return record["access_token"]
+    with _credential_refresh_lock(store.path):
+        record = store.load()
+        if "chatgpt.tokens.use.direct" not in record.get("scopes", []):
+            raise SIWCError("ChatGPT plan inference permission unavailable")
+        expiry = datetime.fromisoformat(record["expires_at"])
+        if expiry > datetime.now(timezone.utc) + timedelta(minutes=2):
+            return record["access_token"]
+        if not record.get("refresh_token"):
+            raise SIWCError("Refresh token unavailable: sign in again")
+        token = _token_request(dict(grant_type="refresh_token", client_id=record["client_id"],
+                                    refresh_token=record["refresh_token"], resource=RESOURCE))
+        claims = _validate_id_token(token["id_token"], record["client_id"]) if token.get("id_token") else None
+        if claims and claims["sub"] != record["subject"]:
+            raise SIWCError("Refreshed account identity changed")
+        scopes = set(token.get("scope", " ".join(record["scopes"])).split())
+        if "chatgpt.tokens.use.direct" not in scopes:
+            raise SIWCError("Refresh removed ChatGPT plan inference permission")
+        record.update(access_token=token["access_token"], refresh_token=token.get("refresh_token", record["refresh_token"]),
+                      scopes=sorted(scopes), expires_at=(datetime.now(timezone.utc) +
+                      timedelta(seconds=int(token.get("expires_in", 3600)))).isoformat())
+        if token.get("id_token"):
+            record["id_token"] = token["id_token"]
+        store.save(record)
+        return record["access_token"]

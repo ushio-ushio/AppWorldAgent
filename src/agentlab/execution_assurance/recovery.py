@@ -164,14 +164,34 @@ def _correction_recovered(correction: dict[str, Any], *, function_name: str,
     return False
 
 def _same_target_readback(correction: dict[str, Any],
-                          executed_requests: tuple[dict[str, Any], ...] | None) -> bool:
+                          executed_requests: tuple[dict[str, Any], ...] | None, *,
+                          outcome: dict[str, Any] | None = None,
+                          request_events: list[Any] | tuple[Any, ...] | None = None) -> bool:
     target_keys = set(correction.get("target_keys", ()))
     entity_keys = set(correction.get("entity_keys", ()))
-    return bool(correction.get("uncertain_write") and (target_keys or entity_keys) and any(
-        str(row.get("method", "")).upper() in {"GET", "HEAD"}
-        and (row.get("target_key") in target_keys or
-             (entity_keys and row.get("entity_key") in entity_keys))
-        for row in (executed_requests or ())))
+    if not correction.get("uncertain_write") or not (target_keys or entity_keys):
+        return False
+    if outcome is not None and outcome.get("ok") is not True:
+        return False
+    rows = [row for row in (executed_requests or ())
+            if str(row.get("method", "")).upper() in {"GET", "HEAD"}
+            and (row.get("target_key") in target_keys or
+                 (entity_keys and row.get("entity_key") in entity_keys))]
+    if not rows:
+        return False
+    if request_events:
+        successful = set()
+        for event in request_events:
+            try:
+                event = (event.as_dict() if hasattr(event, "as_dict") else
+                         vars(event) if hasattr(event, "__dict__") else event)
+                if event.get("execution_status") == "succeeded" and event.get("api_name"):
+                    successful.add(str(event["api_name"]).lower())
+            except (AttributeError, TypeError, ValueError):
+                continue
+        if not successful.intersection(str(row.get("api_name", "")).lower() for row in rows):
+            return False
+    return True
 
 def _local_correction(error: str, *, raw_arguments: Any,
                       executed_requests: tuple[dict[str, Any], ...] | None,

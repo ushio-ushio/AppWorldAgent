@@ -146,7 +146,7 @@ class TestProgrammaticExecutionGuidance(unittest.TestCase):
         self.assertNotIn("Programmatic execution guidance", a_only)
         self.assertIn("Programmatic execution guidance", ab)
         self.assertIn("never use host filesystem access", ab)
-        self.assertIn("Never blindly repeat a side effect.", ab)
+        self.assertIn("do not blindly retry or repeat a payment", ab)
 
     def test_single_execute_python_call_batches_pagination_filter_and_dedup(self):
         code = """\nrows = []\nseen = set()\npage = 1\nwhile True:\n    response = apis.phone.list_records(page=page, access_token='fake', limit=20)\n    for row in response.rows:\n        if row['active'] and row['id'] not in seen:\n            rows.append(row)\n            seen.add(row['id'])\n    if not response.has_more:\n        break\n    page += 1\nstate['results'] = rows\n_result = {'pages': page, 'active_unique_ids': [r['id'] for r in rows]}\n"""

@@ -30,6 +30,28 @@ class GoalStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+_READ_ONLY_POST_PREFIXES = (
+    "search", "query", "list", "show", "read", "find", "lookup", "check",
+    "verify", "validate", "login", "sign_in", "authenticate",
+)
+
+
+def read_only_probe_allowed(method: str, api_name: str) -> bool:
+    """Allow safe HTTP reads and clearly query/authentication-style POST APIs."""
+    method = str(method or "").upper()
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if method != "POST":
+        return False
+    operation = str(api_name or "").rsplit(".", 1)[-1].lower()
+    return any(operation == prefix or operation.startswith(prefix + "_")
+               for prefix in _READ_ONLY_POST_PREFIXES)
+
+
+class ReadOnlyProbeBlocked(RuntimeError):
+    """Raised at the Requester boundary when a reflection probe attempts a write."""
+
+
 def classify_operation(api_name: str, metadata: Mapping[str, Any] | None) -> OperationType:
     """Classify only from official method metadata; never guess from API names."""
     method = str((metadata or {}).get("method", "")).upper()
@@ -159,10 +181,13 @@ class ExecutionEvent:
     gate_blocked: bool = False
     missing_preconditions: list[str] = field(default_factory=list)
     reason: str | None = None
+    response_item_count: int | None = field(default=None, repr=False, compare=False)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)
+        if self.response_item_count is None:
+            row.pop("response_item_count", None)
         row["operation_type"] = self.operation_type.value
         return row
 
@@ -179,8 +204,8 @@ class ExecutionAssuranceState:
     plan_valid: bool = True
 
     def __post_init__(self) -> None:
-        if self.mode not in {"shadow", "enforce"}:
-            raise ValueError("assurance mode must be shadow or enforce")
+        if self.mode not in {"shadow", "enforce", "reflection_v1"}:
+            raise ValueError("assurance mode must be shadow, enforce, or reflection_v1")
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -429,7 +454,8 @@ class OutcomeGate:
 
     def _append_event(self, *, api_name: str, arguments: Mapping[str, Any], status: str,
                       operation: OperationType, gate: dict[str, Any], http_status: int | None = None,
-                      reason: str | None = None) -> ExecutionEvent:
+                      reason: str | None = None,
+                      response_item_count: int | None = None) -> ExecutionEvent:
         active = self._active or {"step": 0, "action_call_id": "external", "event_ids": []}
         related = self.tracker.related_goal_ids(api_name,
                     str(self.api_metadata.get(api_name.lower(), {}).get("description", "")))
@@ -445,7 +471,8 @@ class OutcomeGate:
             preconditions_declared=bool(gate.get("preconditions_declared")),
             gate_would_block=bool(gate.get("would_block")),
             gate_blocked=bool(gate.get("blocked")),
-            missing_preconditions=list(gate.get("missing_preconditions", [])))
+            missing_preconditions=list(gate.get("missing_preconditions", [])),
+            response_item_count=response_item_count)
         self.state.events.append(event)
         active["event_ids"].append(event.event_id)
         if self._active is None:
@@ -491,8 +518,51 @@ class OutcomeGate:
         event = self._append_event(api_name=api_name, arguments=arguments,
                            status="succeeded" if success else "failed", operation=operation,
                            gate=decision, http_status=http_status,
-                           reason=None if success else "requester_returned_non_success_status")
+                            reason=None if success else "requester_returned_non_success_status",
+                            response_item_count=(len(result) if self.state.mode == "reflection_v1"
+                                                 and isinstance(result, list) else None))
         return result
+
+
+def pagination_hints(events: Iterable[Any], api_retriever: Any = None) -> str:
+    """Warn when a full page-zero response was not followed by a later page."""
+    rows = list(events)
+    def page_number(value: Any) -> int | None:
+        try:
+            return int(value) if (type(value) is int or
+                                  isinstance(value, str) and value.isascii() and value.isdecimal()) else None
+        except ValueError:
+            return None
+    later_pages = {str(getattr(event, "api_name", "")).lower() for event in rows
+                   if isinstance(getattr(event, "arguments", None), Mapping)
+                   and (page_number(event.arguments.get("page_index")) or 0) >= 1}
+    schemas = {doc.qualified_name.lower(): doc.official_doc
+               for doc in getattr(api_retriever, "documents", ())}
+    hints, seen = [], set()
+    for event in rows:
+        if getattr(event, "execution_status", None) != "succeeded":
+            continue
+        api_name = str(getattr(event, "api_name", ""))
+        normalized = api_name.lower()
+        arguments = getattr(event, "arguments", {})
+        arguments = arguments if isinstance(arguments, Mapping) else {}
+        schema = schemas.get(normalized, {})
+        parameters = schema.get("parameters", []) if isinstance(schema, Mapping) else []
+        schema_paged = any(isinstance(row, Mapping) and row.get("name") == "page_index" for row in parameters)
+        if not ("page_index" in arguments or "page_limit" in arguments or schema_paged):
+            continue
+        page = page_number(arguments.get("page_index", 0))
+        count = getattr(event, "response_item_count", None)
+        if page != 0 or normalized in later_pages or normalized in seen or type(count) is not int:
+            continue
+        limit = page_number(arguments.get("page_limit")) if "page_limit" in arguments else None
+        threshold = limit if limit is not None and limit > 0 else 5
+        if count < threshold:
+            continue
+        hints.append(f"[Pagination Hint] {api_name} returned {count} items on page 0 and page 1 was not fetched; "
+                     "paginate until empty list [] to confirm full coverage.")
+        seen.add(normalized)
+    return "\n".join(hints)
 
 class RequesterBoundary:
     """Per-task monkey-patch of the AppWorld Requester instance (never vendor code)."""
@@ -502,6 +572,15 @@ class RequesterBoundary:
         self.outcome_gate = outcome_gate
         self.original_request = getattr(requester, "request", None)
         self._installed = False
+        self.read_only = False
+        self.blocked_attempts: list[dict[str, Any]] = []
+
+    def set_read_only(self, enabled: bool) -> None:
+        self.read_only = bool(enabled)
+
+    def drain_blocked_attempts(self) -> list[dict[str, Any]]:
+        attempts, self.blocked_attempts = self.blocked_attempts, []
+        return attempts
 
     @property
     def available(self) -> bool:
@@ -515,9 +594,18 @@ class RequesterBoundary:
         original = self.original_request
         gate = self.outcome_gate
         def wrapped(_app_name: str, _api_name: str, *args: Any, **kwargs: Any) -> Any:
+            api_name = f"{_app_name}.{_api_name}"
+            if self.read_only:
+                metadata = gate.api_metadata.get(api_name.lower(), {})
+                method = str(metadata.get("method", "")).upper()
+                if not read_only_probe_allowed(method, api_name):
+                    self.blocked_attempts.append({"api_name": api_name, "method": method,
+                                                  "reason": "reflection_probe_read_only"})
+                    raise ReadOnlyProbeBlocked(
+                        f"Reflection probe is read-only: {api_name} ({method or 'unknown method'}) was not executed. "
+                        "Use a documented GET or query/login-style POST request.")
             if gate._active is None:
                 return original(_app_name, _api_name, *args, **kwargs)
-            api_name = f"{_app_name}.{_api_name}"
             def invoke(**request_kwargs: Any) -> Any:
                 return original(_app_name, _api_name, *args, **request_kwargs)
             return gate.request(invoke, api_name, kwargs)

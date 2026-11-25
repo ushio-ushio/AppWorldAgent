@@ -18,7 +18,8 @@ When the requested work is verified, call apis.supervisor.complete_task(...) thr
                  schema_aware_retrieval: bool = False,
                  programmatic_execution: bool = False,
                  context_mode: str = "full",
-                 unified_config: UnifiedContextConfig | None = None):
+                 unified_config: UnifiedContextConfig | None = None,
+                 assurance_mode: str = "shadow"):
         prompt = self.SYSTEM_PROMPT
         if schema_aware_retrieval:
             prompt = prompt.replace(
@@ -35,6 +36,12 @@ When the requested work is verified, call apis.supervisor.complete_task(...) thr
                 "- For a batch, retain the expected target set and each item's source, destination, full date or other decision field, and result. Compare expected and observed sets after a readback; print missing and unexpected items. A successful outer Python call does not prove every item succeeded.\n"
                 "- After a batch readback, you may print AGENTLAB_BATCH_CHECK= followed by JSON with expected, observed, and failed ID lists. Only use values obtained from documented AppWorld APIs; this receipt helps check set differences, and does not replace the official evaluator.\n"
                 "- Stop and return control when information is missing, semantics are ambiguous, an error changes the plan, or a safe continuation cannot be established. Do not hide partial success or failures in a batch."
+            )
+        if assurance_mode == "reflection_v1":
+            prompt += (
+                "\n\nExecution completeness discipline:\n"
+                "- For list APIs whose official schema includes `page_index`, loop from page 0 until `[]`; print `(pages_fetched, total_count)`.\n"
+                "- Before batch writes, print the fetched count, filters, target IDs, and current destination state; deduplicate or clear old items only when the task requires it."
             )
         if context_mode in {"dynamic", "unified"} and (
                 context_mode == "dynamic" or unified_config is None or unified_config.manual_retrieval):

@@ -10,6 +10,7 @@
   "execution_assurance_mode": "shadow",
   "max_executor_steps": 100,
   "max_parallel": 5,
+  "worker_start_stagger_seconds": 0.8,
   "task_retry": false,
   "connect_timeout_seconds": 20,
   "read_timeout_seconds": 180,

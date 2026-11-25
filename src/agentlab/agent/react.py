@@ -21,7 +21,10 @@ from agentlab.execution_assurance.recovery import (
     _local_correction, _same_target_readback, _safe_during_uncertain_write,
 )
 from agentlab.execution_assurance.completion_guard import CompletionGuard, batch_set_difference
-from agentlab.execution_assurance.assurance import RequesterBoundary, make_assurance, RequesterEventParser
+from agentlab.execution_assurance.assurance import (
+    RequesterBoundary, make_assurance, pagination_hints, RequesterEventParser,
+)
+from agentlab.execution_assurance.reflection import TerminalReflection, read_only_probe_feedback, repair_feedback
 from agentlab.memory.store import WorkingMemory
 from agentlab.runtime.task_state import TaskState
 from agentlab.runtime.trace import TraceLogger, _zero_usage, _add_usage
@@ -79,10 +82,10 @@ class LangGraphAgent:
         self.schema_aware_retrieval = schema_aware_retrieval
         self.programmatic_execution = programmatic_execution
         self.unified_config = unified_config or UnifiedContextConfig()
-        if assurance_mode not in {"shadow", "enforce"}:
-            raise ValueError("assurance_mode must be 'shadow' or 'enforce'.")
-        if assurance_mode == "enforce" and not plan_guided_react:
-            raise ValueError("assurance_mode=enforce currently requires plan_guided_react and its task-local plan.")
+        if assurance_mode not in {"shadow", "enforce", "reflection_v1"}:
+            raise ValueError("assurance_mode must be 'shadow', 'enforce', or 'reflection_v1'.")
+        if assurance_mode in {"enforce", "reflection_v1"} and not plan_guided_react:
+            raise ValueError(f"assurance_mode={assurance_mode} requires plan_guided_react and its task-local plan.")
         self.assurance_mode = assurance_mode
         self.plan_guided_react = plan_guided_react
         self.max_no_progress_steps = max(1, max_no_progress_steps)
@@ -147,6 +150,37 @@ class LangGraphAgent:
                           "destructive_precondition_count": len(tracker.state.destructive_preconditions)})
         runtime.update(observation_store=observation_store, working_memory=working_memory,
                        task_state=task_state, context_builder=context_builder, tool=tool)
+        reflection_enabled = self.assurance_mode == "reflection_v1"
+        reflection = TerminalReflection(self.model, trace, world.task_id, world.task.instruction) \
+            if reflection_enabled else None
+        if reflection:
+            runtime["terminal_reflection"] = reflection
+
+        def same_target_readback(correction: dict[str, Any], requests: Any,
+                                 outcome: dict[str, Any]) -> bool:
+            if reflection_enabled:
+                return _same_target_readback(
+                    correction, requests, outcome=outcome,
+                    request_events=tool.last_assurance_events)
+            return _same_target_readback(correction, requests)
+
+        def run_buffer_guard(state: AgentState) -> Any:
+            if reflection and reflection.buffer_guard_done:
+                return reflection.buffer_guard_result
+            check = runtime["completion_guard"].review(
+                runtime["lite_evidence"],
+                unresolved_error=_has_unresolved_business_error(runtime),
+                batch_uncertain=bool(runtime.get("lite_unverified_batch")),
+                batch_gap=bool(runtime.get("lite_batch_gap")),
+                assurance_state=runtime.get("assurance_state"))
+            reflection.buffer_guard_done, reflection.buffer_guard_result = True, check
+            trace.append({"task_id": state["task_id"], "step": state.get("step_count", 0),
+                          "event": "completion_guard", "trigger": "reserved_step_buffer",
+                          "status": check.status, "allowed": check.allow,
+                          "attempt": check.attempt, "observed": check.observed,
+                          "missing": check.missing})
+            return check
+
         if runtime.get("lite"):
             schemas = ({doc.qualified_name: doc.official_doc for doc in tool.api_retriever.documents}
                        if tool.api_retriever else {})
@@ -197,8 +231,12 @@ class LangGraphAgent:
                     assurance_context = runtime["goal_tracker"].render_context()
                     model_messages = [*model_messages[:2],
                         {"role": "user", "content": assurance_context}, *model_messages[2:]]
+                available_tools = tool.registry.definitions
+                if reflection and reflection.probe_pending:
+                    available_tools = [definition for definition in available_tools
+                                       if definition.get("function", {}).get("name") == "execute_python"]
                 assistant_message, usage = response_model.generate_tool_calls(
-                    model_messages, tool.registry.definitions, tool_choice=self.tool_choice
+                    model_messages, available_tools, tool_choice=self.tool_choice
                 )
                 transport = getattr(response_model, "last_transport", None)
                 if isinstance(transport, dict):
@@ -280,6 +318,9 @@ class LangGraphAgent:
             new_business_evidence = False
             new_tool_information = False
             error_recovered = False
+            execution_total = state.get("total_usage", _zero_usage())
+            probe_action = bool(reflection and reflection.probe_pending)
+            reflection_triggered_this_step = False
             tool.last_operation_fingerprints = []
             for call in calls:
                 function = call["function"]
@@ -293,6 +334,11 @@ class LangGraphAgent:
                 action_digest, _ = _failed_python_action(function["arguments"])
                 blocked_reason = None
                 completion_blocked = False
+                if (reflection and reflection.authorized_completion
+                        and function["name"] != "execute_python"):
+                    reflection.authorized_completion = False
+                if probe_action and function["name"] != "execute_python":
+                    blocked_reason = "Reflection probe accepts only execute_python with a read-only AppWorld request."
                 if correction and function["name"] == "execute_python":
                     if (action_digest == correction["code_digest"]
                             and not runtime.get("correction_information_changed")):
@@ -314,6 +360,9 @@ class LangGraphAgent:
                     except (TypeError, ValueError, AttributeError):
                         proposed_code = ""
                     completion_form = AppWorldTool._completion_form(proposed_code)
+                    if (reflection and reflection.authorized_completion
+                            and completion_form not in {"direct", "print"}):
+                        reflection.authorized_completion = False
                     if completion_form == "invalid":
                         blocked_reason = ("Completion protocol error: submit only "
                                           "apis.supervisor.complete_task(...) as a single statement, "
@@ -324,25 +373,61 @@ class LangGraphAgent:
                                       "event": "completion_protocol_rejected",
                                       "tool_call_id": call["id"], "reason": "non_standalone_completion"})
                     elif completion_form in {"direct", "print"}:
-                        check = runtime["completion_guard"].review(
-                            runtime["lite_evidence"],
-                            unresolved_error=_has_unresolved_business_error(runtime),
-                            batch_uncertain=bool(runtime.get("lite_unverified_batch")),
-                            batch_gap=bool(runtime.get("lite_batch_gap")),
-                            assurance_state=runtime.get("assurance_state"))
-                        trace.append({"task_id": state["task_id"], "step": state["step_count"],
-                                      "event": "completion_guard", "status": check.status,
-                                      "allowed": check.allow, "attempt": check.attempt,
-                                      "observed": check.observed, "missing": check.missing,
-                                      "goal_status": ({goal_id: goal.status.value for goal_id, goal in
-                                          runtime["assurance_state"].goals.items()}
-                                          if runtime.get("assurance_state") is not None else None)})
-                        if not check.allow:
-                            blocked_reason = ("Completion check failed.\nUser requirement: " +
-                                              world.task.instruction[:500] + "\n" + check.feedback())
+                        reflection_triggered_this_step = True
+                        if probe_action:
+                            blocked_reason = ("A completion call cannot serve as the uncertainty probe. "
+                                              "Use one documented read-only query first; no submission was executed.")
                             completion_blocked = True
-                            if check.attempt > runtime["completion_guard"].max_repairs:
-                                runtime["completion_guard_exhausted"] = True
+                        elif reflection and reflection.authorized_completion:
+                            reflection.authorized_completion = False
+                            trace.append({"task_id": state["task_id"], "step": state["step_count"],
+                                          "event": "terminal_reflection_route",
+                                          "route": "consume_post_probe_completion_authorization"})
+                        elif reflection:
+                            decision, route = reflection.review(
+                                state.get("step_count", 0), "submission",
+                                pending_submission=proposed_code,
+                                requester_boundary=runtime.get("requester_boundary"))
+                            execution_total = _add_usage(execution_total, reflection.last_usage)
+                            if route == "allow_existing_checks":
+                                reflection.authorized_completion = True
+                            elif route == "repair_budget_exhausted":
+                                reflection.terminal_blocked = False
+                                reflection.authorized_completion = True
+                                trace.append({"task_id": state["task_id"], "step": state["step_count"],
+                                              "event": "repair_budget_exhausted_allow_submit",
+                                              "status": decision["status"],
+                                              "repair_rounds": reflection.repair_rounds})
+                            else:
+                                completion_blocked = True
+                                if route == "one_read_only_probe":
+                                    blocked_reason = read_only_probe_feedback(decision)
+                                elif route == "one_bounded_repair":
+                                    blocked_reason = repair_feedback(decision)
+                                else:
+                                    reflection.terminal_blocked = True
+                                    blocked_reason = (repair_feedback(decision) +
+                                                      "\nNo further Reflection repair or probe is allowed; task was not submitted.")
+                        if not blocked_reason:
+                            check = runtime["completion_guard"].review(
+                                runtime["lite_evidence"],
+                                unresolved_error=_has_unresolved_business_error(runtime),
+                                batch_uncertain=bool(runtime.get("lite_unverified_batch")),
+                                batch_gap=bool(runtime.get("lite_batch_gap")),
+                                assurance_state=runtime.get("assurance_state"))
+                            trace.append({"task_id": state["task_id"], "step": state["step_count"],
+                                          "event": "completion_guard", "status": check.status,
+                                          "allowed": check.allow, "attempt": check.attempt,
+                                          "observed": check.observed, "missing": check.missing,
+                                          "goal_status": ({goal_id: goal.status.value for goal_id, goal in
+                                              runtime["assurance_state"].goals.items()}
+                                              if runtime.get("assurance_state") is not None else None)})
+                            if not check.allow:
+                                blocked_reason = ("Completion check failed.\nUser requirement: " +
+                                                  world.task.instruction[:500] + "\n" + check.feedback())
+                                completion_blocked = True
+                                if check.attempt > runtime["completion_guard"].max_repairs:
+                                    runtime["completion_guard_exhausted"] = True
                 if blocked_reason:
                     outcome = {"tool_call_id": call["id"], "name": function["name"],
                                "ok": False, "validation": "blocked", "error": blocked_reason}
@@ -381,6 +466,11 @@ class LangGraphAgent:
                         runtime["lite_repeat_blocks"] = 0
                         runtime["repeated_local_block_count"] = 0
                         runtime["last_local_block_signature"] = None
+                boundary = runtime.get("requester_boundary") if reflection_enabled else None
+                if boundary is not None:
+                    for blocked in boundary.drain_blocked_attempts():
+                        trace.append({"task_id": state["task_id"], "step": state["step_count"],
+                                      "event": "reflection_read_only_block", **blocked})
                 executed_requests = None
                 if capture:
                     requests_after = getattr(requester, "requests", None)
@@ -441,6 +531,10 @@ class LangGraphAgent:
                     empty_success = executed_requests == () and outcome.get("result") == "Execution successful."
                     runtime["empty_execution_streak"] = (
                         runtime.get("empty_execution_streak", 0) + 1 if empty_success else 0)
+                if reflection_enabled and function["name"] == "execute_python":
+                    hint = pagination_hints(tool.last_assurance_events, tool.api_retriever)
+                    if hint:
+                        outcome["result"] = f"{outcome.get('result') or ''}\n{hint}"
                 if function["name"] == "execute_python" and outcome.get("validation") == "accepted":
                     python_count += 1
                 results.append(outcome)
@@ -479,6 +573,21 @@ class LangGraphAgent:
                         for event in linked:
                             trace.append({"task_id": state["task_id"], "step": event.step,
                                 "event": "execution_assurance_event", **event.as_dict()})
+                    if reflection_enabled and function["name"] == "execute_python":
+                        stdout = str(outcome.get("result") or "")
+                        error_output = str(outcome.get("execution_error") or outcome.get("error") or "")
+                        reflection.python_outputs.append({
+                            "step": state["step_count"], "stdout": stdout[:700],
+                            "error": error_output[:350]})
+                        for event in tool.last_assurance_events:
+                            reflection.actions.append({
+                                "step": event.step, "api_name": event.api_name,
+                                "arguments": event.arguments,
+                                "status": event.execution_status,
+                                "status_code": event.http_status,
+                                "evidence_ref": event.result_reference or record.id,
+                                "result_summary": stdout or error_output,
+                            })
                     if runtime.get("lite"):
                         outcome["observation_id"] = record.id
                         messages[-1]["content"] = json.dumps(outcome, ensure_ascii=False, default=str)
@@ -544,8 +653,8 @@ class LangGraphAgent:
                                                   "failed_observation_id": pending_error.get("observation_id"),
                                                   "resolved_by_observation_id": record.id,
                                                   "resolution": "matching_api_success"})
-                                elif not pending_error.get("resolved") and _same_target_readback(
-                                        pending_error, executed_requests):
+                                elif not pending_error.get("resolved") and same_target_readback(
+                                        pending_error, executed_requests, outcome):
                                     pending_error["uncertain_write"] = False
                                     pending_error["business_write_error"] = False
                                     pending_error["resolved"] = True
@@ -563,7 +672,7 @@ class LangGraphAgent:
                                               "event": "executor_local_error_resolved",
                                               "observation_id": record.id,
                                               "resolution": "matching_api_success"})
-                            elif _same_target_readback(active_error, executed_requests):
+                            elif same_target_readback(active_error, executed_requests, outcome):
                                 active_error["uncertain_write"] = False
                                 active_error["business_write_error"] = False
                                 active_error["resolution"] = "readback_observed"
@@ -615,10 +724,54 @@ class LangGraphAgent:
                               **({"executed_requests": executed_requests} if capture else {}),
                               "timestamp": datetime.now(timezone.utc).isoformat()})
             if state.get("protocol_error"):
-                messages.append({"role": "user", "content": f"Tool protocol error: {state['protocol_error']} Return one valid registered tool call."})
+                if not assistant_message.get("tool_calls"):
+                    feedback = (
+                        f"Tool protocol error: {state['protocol_error']}\n"
+                        "The runtime rejects plain text and Python that only prints an explanation. Choose exactly one: "
+                        "(1) call a registered tool to continue pagination or verify remaining data; "
+                        "(2) if you have confirmed no more data is available, call execute_python with only "
+                        "apis.supervisor.complete_task(...) to submit the best result. Return a valid tool call now."
+                    )
+                else:
+                    feedback = f"Tool protocol error: {state['protocol_error']} Return one valid registered tool call."
+                messages.append({"role": "user", "content": feedback})
             observation = json.dumps(results, ensure_ascii=False, default=str) if calls else (state.get("protocol_error") or "No tool call was returned.")
             completed = bool(world.task_completed())
-            completion_candidate = False
+            if reflection and probe_action:
+                reflection.probe_pending = False
+                decision, route = reflection.review(
+                    state.get("step_count", 0), "post_probe",
+                    requester_boundary=runtime.get("requester_boundary"))
+                execution_total = _add_usage(execution_total, reflection.last_usage)
+                boundary_hook = runtime.get("requester_boundary")
+                if boundary_hook is not None:
+                    boundary_hook.set_read_only(False)
+                if route == "allow_existing_checks":
+                    reflection.authorized_completion = True
+                    messages.append({"role": "user", "content": (
+                        "The single read-only uncertainty probe has been reviewed and Reflection returned PASS. "
+                        "You may submit if the task is complete; the existing Completion Guard still applies.")})
+                elif route == "one_bounded_repair":
+                    messages.append({"role": "user", "content": repair_feedback(decision)})
+                elif route == "one_read_only_probe":
+                    messages.append({"role": "user", "content": read_only_probe_feedback(decision)})
+                else:
+                    reflection.terminal_blocked = False
+                    reflection.authorized_completion = True
+                    trace.append({"task_id": state["task_id"], "step": state["step_count"],
+                                  "event": "repair_budget_exhausted_allow_submit",
+                                  "status": decision["status"],
+                                  "repair_rounds": reflection.repair_rounds,
+                                  "trigger": "post_probe", "route": route})
+                    messages.append({"role": "user", "content": (
+                        "The Reflection repair budget is exhausted after the read-only probe. "
+                        "If the task is complete, submit now; the existing Completion Guard still applies. "
+                        "Do not repeat the probe or repeat a side effect.")})
+                if reflection.buffer_guard_pending:
+                    check = run_buffer_guard(state)
+                    reflection.buffer_guard_pending = False
+                    if not check.allow:
+                        messages.append({"role": "user", "content": check.feedback()})
             no_progress_stop = False
             if runtime.get("lite"):
                 if new_business_evidence or error_recovered or new_tool_information:
@@ -631,10 +784,45 @@ class LangGraphAgent:
                                   "event": "no_progress_stop", "streak": runtime["no_progress_streak"],
                                   "limit": self.max_no_progress_steps,
                                   "reason": "No new distinct business evidence, tool information, or error recovery."})
+            buffer_threshold = max(1, self.max_steps - 15)
+            if (reflection and not completed and not reflection_triggered_this_step
+                    and not reflection.buffer_done
+                    and state.get("step_count", 0) >= buffer_threshold):
+                reflection.buffer_done = True
+                decision, route = reflection.review(
+                    state.get("step_count", 0), "reserved_step_buffer",
+                    requester_boundary=runtime.get("requester_boundary"))
+                execution_total = _add_usage(execution_total, reflection.last_usage)
+                feedback = []
+                if route == "one_read_only_probe":
+                    feedback.append(read_only_probe_feedback(decision))
+                    reflection.buffer_guard_pending = True
+                else:
+                    if route == "one_bounded_repair":
+                        feedback.append(repair_feedback(decision))
+                    elif route == "repair_budget_exhausted":
+                        reflection.terminal_blocked = False
+                        reflection.authorized_completion = True
+                        trace.append({"task_id": state["task_id"], "step": state["step_count"],
+                                      "event": "repair_budget_exhausted_allow_submit",
+                                      "status": decision["status"],
+                                      "repair_rounds": reflection.repair_rounds,
+                                      "trigger": "reserved_step_buffer", "route": route})
+                        feedback.append("Reflection repair budget is exhausted. Submit if the task is complete; "
+                                        "the existing Completion Guard still applies.")
+                    elif route == "allow_existing_checks":
+                        feedback.append("Reserved-step evidence review passed; continue only if a user requirement remains, then submit.")
+                    check = run_buffer_guard(state)
+                    if not check.allow:
+                        feedback.append(check.feedback())
+                if feedback:
+                    messages.append({"role": "user", "content": "\n\n".join(feedback)})
             boundary = (no_progress_stop or runtime.get("lite_repeat_blocks", 0) >= 2 or
-                        runtime.get("completion_guard_exhausted")) if runtime.get("lite") else False
+                        runtime.get("completion_guard_exhausted") or
+                (reflection and reflection.terminal_blocked)) if runtime.get("lite") else False
             reason = "appworld_task_completed" if completed else (
                 "no_progress_streak" if no_progress_stop else
+                "reflection_repair_exhausted" if reflection and reflection.terminal_blocked else
                 "completion_guard_exhausted" if runtime.get("completion_guard_exhausted") else
                 "repeated_failed_action" if runtime.get("lite") and boundary else
                 "max_steps_reached" if state.get("step_count", 0) >= self.max_steps else None
@@ -642,13 +830,14 @@ class LangGraphAgent:
             trace.append({"task_id": state["task_id"], "step": state["step_count"],
                           "event": "step", "assistant_message": assistant_message, "observation": observation,
                           "usage": state.get("usage", _zero_usage()),
-                          "total_usage": state.get("total_usage", _zero_usage()),
+                          "total_usage": execution_total,
                           "tool_call_count": len(calls), "python_execution_count": python_count,
                           "started_at": state.get("step_started_at"),
                           "ended_at": datetime.now(timezone.utc).isoformat(), "stop_reason": reason})
             return {"messages": messages, "pending_tool_calls": [],
                     "observation": observation, "tool_call_count": state.get("tool_call_count", 0) + len(calls),
                     "python_execution_count": python_count,
+                    "total_usage": execution_total,
                     "finished": completed or boundary or reason == "max_steps_reached",
                     "stop_reason": reason}
 
@@ -672,7 +861,8 @@ class LangGraphAgent:
                                  schema_aware_retrieval=self.schema_aware_retrieval,
                                  programmatic_execution=self.programmatic_execution,
                                  context_mode=self.context_mode,
-                                 unified_config=self.unified_config if self.context_mode == "unified" else None)
+                                 unified_config=self.unified_config if self.context_mode == "unified" else None,
+                                 assurance_mode=self.assurance_mode)
         trace = TraceLogger(trace_path)
         planner_usage = _zero_usage()
         planner_calls = 0
@@ -691,6 +881,7 @@ class LangGraphAgent:
                                "total_usage": planner_usage, "model_response": "",
                                "pending_tool_calls": [], "protocol_retry_count": 0,
                                "tool_call_count": 0, "python_execution_count": 0}
+        run_runtime = None
         if self.max_input_tokens is not None and planner_usage.get("input_tokens", 0) >= self.max_input_tokens:
             result = {**initial, "stop_reason": "input_token_budget_exceeded", "finished": True}
         elif planner_usage.get("cost_usd", 0) >= self.max_cost_usd or planner_usage.get("output_tokens", 0) >= self.max_output_tokens:
@@ -718,12 +909,20 @@ class LangGraphAgent:
             "unified_config": self.unified_config.__dict__ if self.context_mode == "unified" else None,
             "architecture": "plan_guided_react" if self.plan_guided_react else "react",
             "plan": plan, "planner_calls": planner_calls,
+            **({"terminal_reflection": {
+                "mode": self.assurance_mode,
+                **((run_runtime or {})["terminal_reflection"].summary()
+                   if (run_runtime or {}).get("terminal_reflection") else {}),
+            }} if self.assurance_mode == "reflection_v1" else {}),
             "execution_assurance": (run_runtime["assurance_state"].snapshot()
-                                     if self.plan_guided_react and "run_runtime" in locals()
-                                     and run_runtime.get("assurance_state") is not None else None),
+                                     if self.plan_guided_react and (run_runtime or {}).get("assurance_state") is not None
+                                     else None),
             "api_boundary_coverage": ((run_runtime or {}).get("api_boundary_coverage")
                                       if self.plan_guided_react else None),
-            "steps": result.get("step_count", 0), "llm_request_count": result.get("step_count", 0) + planner_calls,
+            "steps": result.get("step_count", 0), "llm_request_count": (
+                result.get("step_count", 0) + planner_calls +
+                ((run_runtime or {}).get("terminal_reflection").calls
+                 if (run_runtime or {}).get("terminal_reflection") else 0)),
             "stop_reason": result.get("stop_reason"),
             "task_completed_signal": bool(world.task_completed()), "error": result.get("error"),
             "total_usage": result.get("total_usage", _zero_usage()),

@@ -1,6 +1,7 @@
 """Run the frozen Train-15 once in bounded SIWC waves."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,8 @@ CONFIG = json.loads(
 TASKS = tuple(CONFIG["tasks"])
 
 
-def _task_command(task_id: str, experiment: str, task_dir: Path) -> list[str]:
+def _task_command(task_id: str, experiment: str, task_dir: Path,
+                  assurance_mode: str) -> list[str]:
     command = [
         sys.executable, "-u", str(ROOT / "scripts" / "run_siwc_agent.py"),
         "--task-id", task_id, "--model", CONFIG["model"],
@@ -38,7 +40,7 @@ def _task_command(task_id: str, experiment: str, task_dir: Path) -> list[str]:
     if CONFIG["architecture"] == "plan_guided_react":
         command.append("--plan-guided-react")
     command.extend([
-        "--assurance-mode", CONFIG["execution_assurance_mode"],
+        "--assurance-mode", assurance_mode,
         "--max-steps", str(CONFIG["max_executor_steps"]),
         "--siwc-connect-timeout", str(CONFIG["connect_timeout_seconds"]),
         "--siwc-read-timeout", str(CONFIG["read_timeout_seconds"]),
@@ -107,26 +109,36 @@ def _task_result(task_id: str, wave: int, exit_code: int, task_dir: Path) -> dic
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the frozen Train-15 under V3 or reflection_v1.")
+    parser.add_argument("--assurance-mode", choices=("shadow", "reflection_v1"),
+                        default=CONFIG["execution_assurance_mode"])
+    args = parser.parse_args()
     from appworld import load_task_ids
+    from agentlab.models.siwc_auth import access_token
     from agentlab.models.siwc_responses import ChatGPTResponsesAdapter
 
     if len(TASKS) != 15 or not set(TASKS) <= set(load_task_ids("train")):
         raise RuntimeError("Invalid frozen Train-15 task list")
 
-    # Verify the configured model before creating task workers.
+    # Refresh/check shared OAuth credentials before child processes start.
+    access_token()
     adapter = ChatGPTResponsesAdapter(CONFIG["model"])
     adapter.close()
 
-    experiment = CONFIG["experiment_prefix"] + datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = CONFIG["experiment_prefix"]
+    if args.assurance_mode != CONFIG["execution_assurance_mode"]:
+        prefix = prefix.replace(CONFIG["execution_assurance_mode"], args.assurance_mode)
+    experiment = prefix + datetime.now().strftime("%Y%m%d_%H%M%S")
     run_root = ROOT / "runs" / experiment
     run_root.mkdir(parents=True)
     waves = [TASKS[i:i + CONFIG["max_parallel"]]
              for i in range(0, len(TASKS), CONFIG["max_parallel"])]
     effective_config = {
         **CONFIG,
+        "execution_assurance_mode": args.assurance_mode,
         "tasks": TASKS,
         "execution_assurance": {
-            "mode": CONFIG["execution_assurance_mode"],
+            "mode": args.assurance_mode,
             "enabled": True,
             "api_boundary": "AppWorld in-process Requester.request",
         },
@@ -156,10 +168,12 @@ def main() -> None:
             task_dir.mkdir()
             log = (task_dir / "worker.log").open("w", encoding="utf-8")
             process = subprocess.Popen(
-                _task_command(task_id, experiment, task_dir),
+                _task_command(task_id, experiment, task_dir, args.assurance_mode),
                 cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT,
             )
             active[task_id] = (process, log, time.monotonic())
+            if task_id != wave[-1]:
+                time.sleep(max(0.0, float(CONFIG.get("worker_start_stagger_seconds", 0.8))))
 
         while active:
             for task_id, (process, log, started) in list(active.items()):

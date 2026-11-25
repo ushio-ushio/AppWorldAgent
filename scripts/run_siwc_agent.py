@@ -38,13 +38,13 @@ def main() -> None:
                         help="Seconds to establish each SIWC proxy/TLS connection")
     parser.add_argument("--plan-guided-react", action="store_true",
                         help="One-shot advisory plan followed by ordinary ReAct execution")
-    parser.add_argument("--assurance-mode", choices=("shadow", "enforce"), default="shadow",
-                        help="V3 Execution Assurance mode; enforce requires plan-guided ReAct")
+    parser.add_argument("--assurance-mode", choices=("shadow", "enforce", "reflection_v1"), default="shadow",
+                        help="Execution Assurance: shadow (baseline), enforce, or opt-in reflection_v1")
     parser.add_argument("--max-no-progress-steps", type=int, default=18,
                         help="V3 consecutive steps without new evidence or error recovery")
     args = parser.parse_args()
-    if args.assurance_mode == "enforce" and not args.plan_guided_react:
-        parser.error("--assurance-mode enforce requires --plan-guided-react")
+    if args.assurance_mode in {"enforce", "reflection_v1"} and not args.plan_guided_react:
+        parser.error(f"--assurance-mode {args.assurance_mode} requires --plan-guided-react")
     if args.plan_guided_react and os.name == "nt" and not sys.flags.utf8_mode:
         parser.error("V2-Lite on Windows requires PYTHONUTF8=1 or python -X utf8 before startup")
     if args.schema_aware_retrieval is None:
@@ -81,6 +81,7 @@ def main() -> None:
         "architecture": "plan_guided_react" if args.plan_guided_react else "react",
         "execution_assurance": {"mode": args.assurance_mode,
                                 "enabled": args.plan_guided_react,
+                                "terminal_reflection": args.assurance_mode == "reflection_v1",
                                 "api_boundary": "AppWorld in-process Requester.request"},
         "max_no_progress_steps": args.max_no_progress_steps,
         "efficient_tool_use": {"schema_aware_retrieval": args.schema_aware_retrieval,

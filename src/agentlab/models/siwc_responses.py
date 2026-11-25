@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -30,7 +33,7 @@ class SIWCTransportError(SIWCError):
     def __init__(self, *, phase: str, error_class: str, request_bytes: int = 0,
                  events_seen: int = 0, partial_output: bool = False,
                  tool_signal_seen: bool = False, elapsed_seconds: float = 0.0,
-                 request_may_have_been_received: bool = True):
+                 request_may_have_been_received: bool = True, status_code: int | None = None):
         self.diagnostic = {
             "phase": phase, "error_class": error_class, "request_bytes": request_bytes,
             "events_seen": events_seen, "partial_output": partial_output,
@@ -38,6 +41,8 @@ class SIWCTransportError(SIWCError):
             "elapsed_seconds": round(elapsed_seconds, 3),
             "request_may_have_been_received": request_may_have_been_received,
         }
+        if status_code is not None:
+            self.diagnostic["status_code"] = status_code
         super().__init__("SIWC transport failed: " + phase + " (" + error_class + ")")
 
 
@@ -46,6 +51,7 @@ class ChatGPTResponsesAdapter:
                  connect_timeout_seconds: int = 20):
         self.timeout_seconds = timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.max_transport_retries = 3
         # Each AppWorld worker owns one adapter. Reuse its proxy/TLS pool across
         # model turns instead of constructing a new Session for every request.
         self._session = requests.Session()
@@ -64,6 +70,73 @@ class ChatGPTResponsesAdapter:
     def close(self) -> None:
         self._session.close()
 
+    def _rebuild_session(self) -> None:
+        old = self._session
+        self._session = requests.Session()
+        old.close()
+
+    @staticmethod
+    def _contains_permission_error(exc: BaseException) -> bool:
+        pending, seen = [exc], set()
+        while pending:
+            item = pending.pop()
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if isinstance(item, PermissionError):
+                return True
+            pending.extend(x for x in (getattr(item, "__cause__", None),
+                                       getattr(item, "__context__", None),
+                                       getattr(item, "reason", None)) if isinstance(x, BaseException))
+        return False
+
+    @staticmethod
+    def _phase(exc: BaseException, *, streaming: bool = False) -> str:
+        if streaming:
+            return "sse_streaming"
+        if isinstance(exc, requests.exceptions.SSLError):
+            return "tls_handshake"
+        if isinstance(exc, (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout,
+                            requests.exceptions.ConnectionError, ConnectionError)):
+            return "proxy_or_connect"
+        return "awaiting_headers"
+
+    @staticmethod
+    def _retry_after_seconds(headers: dict) -> float | None:
+        value = headers.get("Retry-After") if headers else None
+        if not value:
+            return None
+        try:
+            return max(0.0, min(15.0, float(value)))
+        except (ValueError, TypeError):
+            try:
+                date = parsedate_to_datetime(value)
+                return max(0.0, min(15.0, (date - datetime.now(timezone.utc)).total_seconds()))
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+    def _attach_retries(self, exc: BaseException, state: dict, *, phase: str,
+                        status_code: int | None = None) -> None:
+        if state["history"]:
+            diagnostic = getattr(exc, "diagnostic", {})
+            diagnostic.update(phase=phase, transport_retry_count=len(state["history"]),
+                              transport_retries=state["history"])
+            if status_code is not None:
+                diagnostic["status_code"] = status_code
+            exc.diagnostic = diagnostic
+
+    def _retry(self, state: dict, *, stage: str, error_type: str,
+               status_code: int | None = None, retry_after: float | None = None,
+               rebuild: bool = False) -> None:
+        retry_number = len(state["history"])
+        delay = retry_after if retry_after is not None else min(15.0, 2 ** retry_number) + random.uniform(0, 0.5)
+        state["history"].append({"attempt": state["attempt"], "stage": stage,
+                                 "error_type": error_type, "status_code": status_code,
+                                 "backoff_ms": round(delay * 1000)})
+        if rebuild:
+            self._rebuild_session()
+        time.sleep(delay)
+
     @staticmethod
     def _http_error(status: int) -> SIWCError:
         if status == 401:
@@ -76,27 +149,38 @@ class ChatGPTResponsesAdapter:
             return SIWCError("SIWC Responses tool/request format incompatible")
         return SIWCError(f"SIWC endpoint HTTP {status}")
 
-    def _request(self, method: str, endpoint: str, *, body: dict | None = None, stream: bool = False):
-        # A POST can reach the service even if no response headers arrive.
-        # Replaying it could duplicate model usage. No Tool Node action executes
-        # until a complete response has been parsed, so fail closed instead.
-        last_exc = None
-        max_attempts = 1 if method.upper() == "POST" else 3
-        for attempt in range(max_attempts):
+    def _request(self, method: str, endpoint: str, *, body: dict | None = None,
+                 stream: bool = False, _retry_state: dict | None = None):
+        state = _retry_state if _retry_state is not None else {"attempt": 0, "history": []}
+        max_attempts = getattr(self, "max_transport_retries", 3) + 1
+        retryable_statuses = {408, 429, 500, 502, 503, 504}
+        while state["attempt"] < max_attempts:
+            state["attempt"] += 1
             try:
                 result = self._session.request(method, RESOURCE + endpoint,
                     headers={"Authorization": "Bearer " + access_token(), "Content-Type": "application/json"},
                     json=body, stream=stream,
                     timeout=(self.connect_timeout_seconds, self.timeout_seconds))
+            except SIWCError as exc:
+                self._attach_retries(exc, state, phase="awaiting_headers")
+                raise
             except (requests.RequestException, OSError) as exc:
-                last_exc = exc
-                if attempt + 1 < max_attempts:
-                    time.sleep(0.75 * (2 ** attempt))
+                permission_denied = self._contains_permission_error(exc)
+                retryable = isinstance(exc, (requests.exceptions.SSLError,
+                    requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError, ConnectionError, TimeoutError))
+                if retryable and not permission_denied and state["attempt"] < max_attempts:
+                    rebuild = isinstance(exc, (requests.exceptions.SSLError,
+                        requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError,
+                        ConnectionError))
+                    self._retry(state, stage=self._phase(exc), error_type=type(exc).__name__, rebuild=rebuild)
                     continue
-                phase = "connect" if isinstance(exc, requests.ConnectTimeout) else "awaiting_headers"
-                raise SIWCTransportError(
-                    phase=phase, error_class=type(exc).__name__,
-                    request_may_have_been_received=phase != "connect") from exc
+                phase = self._phase(exc)
+                error = SIWCTransportError(phase=phase, error_class=type(exc).__name__,
+                    request_may_have_been_received=not isinstance(exc, (requests.exceptions.ProxyError,
+                        requests.exceptions.ConnectTimeout, requests.exceptions.SSLError)))
+                self._attach_retries(error, state, phase=phase)
+                raise error from exc
             if result.status_code == 429:
                 # SIWC usage-limit 429s must stop new work; replaying the same
                 # request cannot restore quota and can obscure the limit signal.
@@ -105,23 +189,31 @@ class ChatGPTResponsesAdapter:
                     error_code = (error_payload.get("error") or {}).get("code")
                 except (ValueError, AttributeError, TypeError):
                     error_code = None
-                result.close()
                 if error_code == "subscription_sharing_usage_limit_exceeded":
-                    raise SIWCError("ChatGPT plan or app usage limit reached; stop new requests and review ChatGPT Usage")
-                raise self._http_error(429)
-            if 500 <= result.status_code <= 599:
+                    result.close()
+                    error = SIWCError("ChatGPT plan or app usage limit reached; stop new requests and review ChatGPT Usage")
+                    self._attach_retries(error, state, phase="http_response", status_code=429)
+                    raise error
+            if result.status_code in retryable_statuses:
                 code = result.status_code
+                headers = getattr(result, "headers", {}) or {}
                 result.close()
-                if attempt + 1 < max_attempts:
-                    time.sleep(0.75 * (2 ** attempt))
+                if state["attempt"] < max_attempts:
+                    self._retry(state, stage="http_response", error_type="HTTPStatus",
+                                status_code=code, retry_after=self._retry_after_seconds(headers))
                     continue
-                raise SIWCError(f"SIWC endpoint HTTP {code} after {max_attempts} request attempt(s)")
+                error = (self._http_error(code) if code == 429 else
+                         SIWCError(f"SIWC endpoint HTTP {code} after {state['attempt']} request attempt(s)"))
+                self._attach_retries(error, state, phase="http_response", status_code=code)
+                raise error
             if result.status_code != 200:
                 code = result.status_code
                 result.close()
-                raise self._http_error(code)
+                error = self._http_error(code)
+                self._attach_retries(error, state, phase="http_response", status_code=code)
+                raise error
             return result
-        raise SIWCError("SIWC request failed") from last_exc
+        raise SIWCError("SIWC request failed")
 
     def list_models(self) -> list[dict[str, str]]:
         result = self._request("GET", "/models")
@@ -174,65 +266,81 @@ class ChatGPTResponsesAdapter:
                 "store": False, "stream": True}
         started = _wall_seconds()
         request_bytes = len(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"))
-        try:
-            connection = self._request("POST", "/responses", body=body, stream=True)
-        except SIWCTransportError as exc:
-            exc.diagnostic.update(request_bytes=request_bytes,
-                                  elapsed_seconds=round(_wall_seconds() - started, 3),
-                                  connect_timeout_seconds=self.connect_timeout_seconds,
-                                  read_timeout_seconds=self.timeout_seconds)
-            raise
-        completed = None
-        failure = None
-        events_seen = 0
-        partial_output = False
-        tool_signal_seen = False
-        try:
-            for line in connection.iter_lines(decode_unicode=True):
-                if isinstance(line, bytes):
-                    line = line.decode("utf-8", errors="replace")
-                if not line or not line.startswith("data: ") or line == "data: [DONE]":
+        retry_state = {"attempt": 0, "history": []}
+        while True:
+            completed, failure = None, None
+            events_seen, partial_output, tool_signal_seen = 0, False, False
+            try:
+                connection = self._request("POST", "/responses", body=body, stream=True,
+                                           _retry_state=retry_state)
+            except SIWCError as exc:
+                if isinstance(getattr(exc, "diagnostic", None), dict):
+                    exc.diagnostic.update(request_bytes=request_bytes,
+                        elapsed_seconds=round(_wall_seconds() - started, 3),
+                        connect_timeout_seconds=self.connect_timeout_seconds,
+                        read_timeout_seconds=self.timeout_seconds)
+                raise
+            try:
+                for line in connection.iter_lines(decode_unicode=True):
+                    if isinstance(line, bytes):
+                        line = line.decode("utf-8", errors="replace")
+                    if not line or not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                        if not isinstance(event, dict):
+                            raise ValueError("SSE event is not an object")
+                    except (ValueError, TypeError) as exc:
+                        error = SIWCTransportError(phase="sse_streaming", error_class="InvalidEventJSON",
+                            request_bytes=request_bytes, events_seen=events_seen,
+                            partial_output=partial_output, tool_signal_seen=tool_signal_seen,
+                            elapsed_seconds=_wall_seconds() - started)
+                        self._attach_retries(error, retry_state, phase="sse_streaming")
+                        raise error from exc
+                    events_seen += 1
+                    event_type = str(event.get("type", ""))
+                    partial_output |= event_type in {"response.output_text.delta", "response.content_part.added"} or (
+                        event_type == "response.output_item.added" and
+                        (event.get("item") or {}).get("type") == "message")
+                    tool_signal_seen |= event_type.startswith("response.function_call_arguments.") or (
+                        event_type == "response.output_item.added" and
+                        (event.get("item") or {}).get("type") == "function_call")
+                    partial_output |= tool_signal_seen
+                    if event_type == "response.completed":
+                        completed = event.get("response")
+                        break
+                    if event_type == "response.failed":
+                        failure = event.get("response", {}).get("error", {}).get("code", "unknown")
+            except (requests.RequestException, OSError, UnicodeError) as exc:
+                retryable = isinstance(exc, (requests.exceptions.SSLError,
+                    requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError, ConnectionError, TimeoutError))
+                if retryable and not self._contains_permission_error(exc) and retry_state["attempt"] <= getattr(self, "max_transport_retries", 3):
+                    self._retry(retry_state, stage="sse_streaming", error_type=type(exc).__name__, rebuild=True)
                     continue
-                try:
-                    event = json.loads(line[6:])
-                    if not isinstance(event, dict):
-                        raise ValueError("SSE event is not an object")
-                except (ValueError, TypeError) as exc:
-                    raise SIWCTransportError(
-                        phase="streaming", error_class="InvalidEventJSON",
-                        request_bytes=request_bytes, events_seen=events_seen,
-                        partial_output=partial_output, tool_signal_seen=tool_signal_seen,
-                        elapsed_seconds=_wall_seconds() - started) from exc
-                events_seen += 1
-                event_type = str(event.get("type", ""))
-                partial_output |= event_type in {"response.output_text.delta", "response.content_part.added"} or (
-                    event_type == "response.output_item.added" and
-                    (event.get("item") or {}).get("type") == "message")
-                tool_signal_seen |= event_type.startswith("response.function_call_arguments.") or (
-                    event_type == "response.output_item.added" and
-                    (event.get("item") or {}).get("type") == "function_call")
-                partial_output |= tool_signal_seen
-                if event_type == "response.completed":
-                    completed = event.get("response")
-                    break
-                elif event_type == "response.failed":
-                    failure = event.get("response", {}).get("error", {}).get("code", "unknown")
-        except (requests.RequestException, OSError, UnicodeError) as exc:
-            raise SIWCTransportError(
-                phase="streaming", error_class=type(exc).__name__,
-                request_bytes=request_bytes, events_seen=events_seen,
-                partial_output=partial_output, tool_signal_seen=tool_signal_seen,
-                elapsed_seconds=_wall_seconds() - started) from exc
-        finally:
-            connection.close()
-        if failure:
-            raise SIWCError(f"SIWC response failed: {failure}")
-        if not completed:
-            raise SIWCTransportError(
-                phase="stream_ended", error_class="IncompleteStream",
+                error = SIWCTransportError(phase="sse_streaming", error_class=type(exc).__name__,
+                    request_bytes=request_bytes, events_seen=events_seen,
+                    partial_output=partial_output, tool_signal_seen=tool_signal_seen,
+                    elapsed_seconds=_wall_seconds() - started)
+                self._attach_retries(error, retry_state, phase="sse_streaming")
+                raise error from exc
+            finally:
+                connection.close()
+            if failure:
+                error = SIWCError(f"SIWC response failed: {failure}")
+                self._attach_retries(error, retry_state, phase="sse_streaming")
+                raise error
+            if completed:
+                break
+            error = SIWCTransportError(phase="sse_streaming", error_class="IncompleteStream",
                 request_bytes=request_bytes, events_seen=events_seen,
                 partial_output=partial_output, tool_signal_seen=tool_signal_seen,
                 elapsed_seconds=_wall_seconds() - started)
+            if retry_state["attempt"] <= getattr(self, "max_transport_retries", 3):
+                self._retry(retry_state, stage="sse_streaming", error_type="IncompleteStream", rebuild=True)
+                continue
+            self._attach_retries(error, retry_state, phase="sse_streaming")
+            raise error
         calls = []
         texts = []
         for item in completed.get("output", []):
@@ -251,4 +359,7 @@ class ChatGPTResponsesAdapter:
                                "events_seen": events_seen, "partial_output": partial_output,
                                "tool_signal_seen": tool_signal_seen,
                                "elapsed_seconds": round(_wall_seconds() - started, 3)}
+        if retry_state["history"]:
+            self.last_transport.update(transport_retry_count=len(retry_state["history"]),
+                                       transport_retries=retry_state["history"])
         return {"role": "assistant", "content": "".join(texts) or None, "tool_calls": calls}, usage

@@ -119,6 +119,11 @@ class TestFunctionCallingProtocol(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "invalid_tool_protocol")
         self.assertEqual(len(model.requests), 2)
         self.assertEqual(world.executed, [])
+        correction = model.requests[1]["messages"][-1]["content"]
+        self.assertIn("Choose exactly one", correction)
+        self.assertIn("continue pagination", correction)
+        self.assertIn("apis.supervisor.complete_task(...)", correction)
+        self.assertIn("rejects plain text", correction)
 
 
 if __name__ == "__main__":
