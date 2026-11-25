@@ -14,11 +14,12 @@ run_records/
 .v1_2_b_stage/
 .pre_v3_backup*/
 appworld_agent_starter_v0/
+patches/
 .tmp/
 summary.json
 *.log
 
-# Preserve only the frozen public Train task ID list needed by the runner
+# Keep local analysis reports out of the source repository
 reports/*
 
 # Python and test artifacts
