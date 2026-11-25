@@ -16,15 +16,15 @@ AppWorld source code, task data, hidden evaluation material, run traces, and SIW
 - `runtime`: task state and trace writing.
 - `evaluation`: parsing official evaluator reports.
 
-`experiments/run_v3_shadow_train15.py` is the retained Train-15 batch runner. It reads `configs/v3_shadow_train15.json` and writes new runs to the sibling `runs` directory; it starts model-backed tasks only when explicitly run. The current Windows runner expects this checkout at `D:\worldapp\.v1_2_b_stage` and AppWorld at `D:\worldapp\vendor\appworld`.
+`experiments/run_v3_shadow_train15.py` is the retained Train-15 batch runner. It reads the task IDs and settings from `configs/v3_shadow_train15.json` and writes new runs to `D:\worldapp\runs`; it starts model-backed tasks only when explicitly run.
 
 ## Offline checks
 
-From this directory in the Windows Conda `agent` environment, with AppWorld installed at the path above:
+From `D:\worldapp` in the Windows Conda `agent` environment, with AppWorld installed at `D:\worldapp\vendor\appworld`:
 
 ```powershell
 $env:APPWORLD_ROOT = "D:\worldapp\vendor\appworld"
-$env:PYTHONPATH = "D:\worldapp\.v1_2_b_stage\src;$env:APPWORLD_ROOT\src"
+$env:PYTHONPATH = "D:\worldapp\src;$env:APPWORLD_ROOT\src"
 python -m compileall -q src scripts experiments tests
 python -m pytest -q
 ```

@@ -1,7 +1,6 @@
 # Local configuration and credentials
 .env
 .env.*
-!.env.example
 *.dat
 *.pem
 *.key
@@ -10,13 +9,16 @@
 data/
 vendor/
 runs/
+run_records/
+.vscode/
+.v1_2_b_stage/
+.pre_v3_backup*/
 .tmp/
 summary.json
 *.log
 
 # Preserve only the frozen public Train task ID list needed by the runner
 reports/*
-!reports/v2_lite_train15_task_ids.json
 
 # Python and test artifacts
 **/__pycache__/

@@ -11,24 +11,21 @@ import time
 from datetime import datetime
 
 
-ROOT = Path(__file__).resolve().parents[2]
-STAGE = ROOT / ".v1_2_b_stage"
-sys.path.insert(0, str(STAGE / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from agentlab.evaluation.report import parse_report_counts
 
 
-TASKS = tuple(json.loads(
-    (STAGE / "reports" / "v2_lite_train15_task_ids.json").read_text(encoding="utf-8")
-))
 CONFIG = json.loads(
-    (STAGE / "configs" / "v3_shadow_train15.json").read_text(encoding="utf-8")
+    (ROOT / "configs" / "v3_shadow_train15.json").read_text(encoding="utf-8")
 )
+TASKS = tuple(CONFIG["tasks"])
 
 
 def _task_command(task_id: str, experiment: str, task_dir: Path) -> list[str]:
     command = [
-        sys.executable, "-u", str(STAGE / "scripts" / "run_siwc_agent.py"),
+        sys.executable, "-u", str(ROOT / "scripts" / "run_siwc_agent.py"),
         "--task-id", task_id, "--model", CONFIG["model"],
         "--context-mode", CONFIG["context_mode"],
     ]
@@ -145,7 +142,7 @@ def main() -> None:
         "PYTHONUTF8": "1",
         "APPWORLD_ROOT": str(ROOT / "vendor" / "appworld"),
         "PYTHONPATH": os.pathsep.join((
-            str(STAGE / "src"), str(ROOT / "vendor" / "appworld" / "src")
+        str(ROOT / "src"), str(ROOT / "vendor" / "appworld" / "src")
         )),
     }
     results: list[dict] = []

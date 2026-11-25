@@ -19,7 +19,7 @@
 必须在能被桌面 Edge 访问其本机回环端口的 **Windows 主机 shell** 中运行，不要在隔离容器、远程 Linux 或无法共享 Windows `127.0.0.1` 的执行沙箱中启动监听器。建议使用 Windows Terminal / PowerShell，并确保使用同一 Windows 用户，以便 DPAPI 凭据可用：
 
 ```powershell
-$repo = 'D:\worldapp\.v1_2_b_stage'
+$repo = 'D:\worldapp'
 & "$env:CONDA_PREFIX\python.exe" "$repo\scripts\siwc_manual_login.py"
 ```
 

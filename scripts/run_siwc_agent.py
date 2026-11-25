@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 os.environ["APPWORLD_ROOT"] = str(Path(os.getenv("APPWORLD_ROOT", ROOT / "vendor" / "appworld")))
 os.environ.setdefault("APPWORLD_CACHE", str(Path(os.environ["APPWORLD_ROOT"]) / ".tmp" / "agent-cache"))
 

@@ -15,5 +15,22 @@
   "read_timeout_seconds": 180,
   "model_post_retry": false,
   "windows_python_utf8_mode": true,
-  "experiment_prefix": "agentlab_v2_lite_v3_assurance_shadow_train15_"
+  "experiment_prefix": "agentlab_v2_lite_v3_assurance_shadow_train15_",
+  "tasks": [
+    "27e1026_3",
+    "6ea6792_2",
+    "82e2fac_3",
+    "c901732_3",
+    "e7a10f8_1",
+    "e85d92a_3",
+    "2a163ab_3",
+    "60d0b5b_3",
+    "aa8502b_3",
+    "b7a9ee9_3",
+    "ccb4494_3",
+    "ce359b5_3",
+    "6104387_1",
+    "afc0fce_2",
+    "b0a8eae_2"
+  ]
 }
