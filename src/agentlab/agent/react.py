@@ -13,6 +13,7 @@ from agentlab.agent.planner import one_shot_plan
 from agentlab.agent.prompt import ContextManager
 from agentlab.context_engineering.dynamic import DynamicContextBuilder
 from agentlab.memory.store import ObservationStore
+from agentlab.context_engineering.context import CacheFirstContextBuilder
 from agentlab.context_engineering.unified import UnifiedContextBuilder, UnifiedContextConfig
 from agentlab.environments.appworld import AppWorldTool
 from agentlab.execution_assurance.recovery import (
@@ -25,9 +26,12 @@ from agentlab.execution_assurance.assurance import (
     RequesterBoundary, make_assurance, pagination_hints, RequesterEventParser,
 )
 from agentlab.execution_assurance.reflection import TerminalReflection, read_only_probe_feedback, repair_feedback
+from agentlab.execution_assurance.reflection_v2 import TerminalAudit, audit_feedback
 from agentlab.memory.store import WorkingMemory
 from agentlab.runtime.task_state import TaskState
 from agentlab.runtime.trace import TraceLogger, _zero_usage, _add_usage
+from agentlab.models.siwc_responses import SIWCContextOverflowError
+from agentlab.tool_engineering.tools import ApiRetriever, app_capability_catalog
 
 
 class AgentState(TypedDict, total=False):
@@ -68,7 +72,7 @@ class LangGraphAgent:
                  plan_guided_react: bool = False,
                  assurance_mode: str = "shadow",
                  max_no_progress_steps: int = 18):
-        if context_mode not in {"full", "dynamic", "unified"}:
+        if context_mode not in {"full", "dynamic", "unified", "cache_first"}:
             raise ValueError("Unknown context_mode.")
         self.model = model
         self.max_steps = max_steps
@@ -82,9 +86,9 @@ class LangGraphAgent:
         self.schema_aware_retrieval = schema_aware_retrieval
         self.programmatic_execution = programmatic_execution
         self.unified_config = unified_config or UnifiedContextConfig()
-        if assurance_mode not in {"shadow", "enforce", "reflection_v1"}:
-            raise ValueError("assurance_mode must be 'shadow', 'enforce', or 'reflection_v1'.")
-        if assurance_mode in {"enforce", "reflection_v1"} and not plan_guided_react:
+        if assurance_mode not in {"shadow", "enforce", "reflection_v1", "reflection_v2"}:
+            raise ValueError("assurance_mode must be 'shadow', 'enforce', 'reflection_v1', or 'reflection_v2'.")
+        if assurance_mode in {"enforce", "reflection_v1", "reflection_v2"} and not plan_guided_react:
             raise ValueError(f"assurance_mode={assurance_mode} requires plan_guided_react and its task-local plan.")
         self.assurance_mode = assurance_mode
         self.plan_guided_react = plan_guided_react
@@ -102,6 +106,8 @@ class LangGraphAgent:
         if runtime.get("working_memory") is not None:
             working_memory = runtime["working_memory"]
         context_builder = (
+            CacheFirstContextBuilder(observation_store, model=self.model)
+            if self.context_mode == "cache_first" and observation_store else
             UnifiedContextBuilder(observation_store, working_memory, task_state, self.unified_config)
             if self.context_mode == "unified" else
             DynamicContextBuilder(observation_store, strategy=self.context_mode)
@@ -114,7 +120,8 @@ class LangGraphAgent:
             working_memory=working_memory if self.unified_config.memory else None,
             task_state=task_state if self.unified_config.task_state else None,
             manual_retrieval=self.unified_config.manual_retrieval if self.context_mode == "unified" else True,
-            outcome_gate=runtime.get("outcome_gate"))
+            outcome_gate=runtime.get("outcome_gate"),
+            api_retriever=runtime.get("api_retriever"))
         if runtime.get("assurance_enabled"):
             api_metadata = ({doc.qualified_name: doc.official_doc
                              for doc in tool.api_retriever.documents}
@@ -150,9 +157,12 @@ class LangGraphAgent:
                           "destructive_precondition_count": len(tracker.state.destructive_preconditions)})
         runtime.update(observation_store=observation_store, working_memory=working_memory,
                        task_state=task_state, context_builder=context_builder, tool=tool)
-        reflection_enabled = self.assurance_mode == "reflection_v1"
-        reflection = TerminalReflection(self.model, trace, world.task_id, world.task.instruction) \
-            if reflection_enabled else None
+        reflection_v1_enabled = self.assurance_mode == "reflection_v1"
+        reflection_enabled = self.assurance_mode in {"reflection_v1", "reflection_v2"}
+        reflection = (TerminalReflection(self.model, trace, world.task_id, world.task.instruction)
+                      if reflection_v1_enabled else
+                      TerminalAudit(self.model, trace, world.task_id, world.task.instruction)
+                      if self.assurance_mode == "reflection_v2" else None)
         if reflection:
             runtime["terminal_reflection"] = reflection
 
@@ -187,6 +197,15 @@ class LangGraphAgent:
             runtime["lite_request_parser"] = tool.request_parser or RequesterEventParser(schemas)
             runtime["completion_guard"] = CompletionGuard(world.task.instruction)
             runtime["lite_evidence"] = []
+        if self.assurance_mode == "reflection_v2":
+            runtime["audit_ledger"] = []
+
+        def review_terminal(step: int, trigger: str, *, pending_submission: str | None = None):
+            if self.assurance_mode == "reflection_v2":
+                return reflection.review(step, trigger, pending_submission=pending_submission,
+                                         ledger=runtime.get("audit_ledger", []))
+            return reflection.review(step, trigger, pending_submission=pending_submission,
+                                     requester_boundary=runtime.get("requester_boundary"))
 
         def agent_node(state: AgentState) -> dict[str, Any]:
             if state.get("step_count", 0) >= self.max_steps:
@@ -206,6 +225,10 @@ class LangGraphAgent:
                 if not hasattr(response_model, "generate_tool_calls"):
                     raise TypeError("Selected model adapter does not support Function Calling.")
                 model_messages = state["messages"]
+                available_tools = tool.registry.definitions
+                if reflection and reflection.probe_pending:
+                    available_tools = [definition for definition in available_tools
+                                       if definition.get("function", {}).get("name") == "execute_python"]
                 if context_builder is not None:
                     assurance_context = (runtime["goal_tracker"].render_context()
                                          if runtime.get("goal_tracker") is not None else None)
@@ -214,6 +237,28 @@ class LangGraphAgent:
                             model_messages, goal_handoff=runtime.get("goal_handoff"),
                             active_correction=runtime.get("active_correction"),
                             assurance_context=assurance_context)
+                    elif isinstance(context_builder, CacheFirstContextBuilder):
+                        volatile_parts = []
+                        if assurance_context:
+                            volatile_parts.append(assurance_context)
+                        handoff = runtime.get("goal_handoff")
+                        if handoff:
+                            volatile_parts.append("CURRENT GOAL HANDOFF (dynamic reference):\n" +
+                                                  json.dumps(handoff, ensure_ascii=False, default=str))
+                        correction = runtime.get("active_correction")
+                        if correction:
+                            correction_fields = {key: correction.get(key) for key in (
+                                "category", "api_name", "reason", "observation_id", "attempts",
+                                "uncertain_write", "official_schema") if key in correction}
+                            volatile_parts.append("ACTIVE EXECUTOR ERROR (dynamic, not a new result):\n" +
+                                                  json.dumps(correction_fields, ensure_ascii=False, default=str))
+                        model_messages, view_stats = context_builder.build(
+                            model_messages, step=step, max_steps=self.max_steps,
+                            usage=state.get("usage"), max_cost_usd=self.max_cost_usd,
+                            max_input_tokens=self.max_input_tokens,
+                            max_output_tokens=self.max_output_tokens,
+                            volatile_context="\n\n".join(volatile_parts) or None,
+                            tool_definitions=available_tools)
                     else:
                         model_messages, view_stats = context_builder.build(model_messages)
                         if assurance_context:
@@ -226,18 +271,48 @@ class LangGraphAgent:
                                   **({"unified": {key: value for key, value in view_stats.items()
                                                  if key != "offloaded_ids"}}
                                      if self.context_mode == "unified" else {}),
+                                  **({"cache_first": {key: value for key, value in view_stats.items()
+                                                      if key != "offloaded_ids"}}
+                                     if self.context_mode == "cache_first" else {}),
                                   "timestamp": timestamp})
+                    if (self.context_mode == "cache_first" and
+                            view_stats.get("estimated_tokens", 0) >
+                            view_stats.get("hard_capacity_tokens", 20000)):
+                        trace.append({"task_id": state["task_id"], "step": step,
+                                      "event": "context_capacity_stop",
+                                      "estimated_tokens": view_stats["estimated_tokens"],
+                                      "hard_capacity_tokens": view_stats.get("hard_capacity_tokens", 20000),
+                                      "compact_level": view_stats.get("compact_level", 0)})
+                        return {"step_count": state.get("step_count", 0), "finished": True,
+                                "stop_reason": "context_capacity_exceeded",
+                                "pending_tool_calls": [], "total_usage": state.get("total_usage", _zero_usage()),
+                                "usage": _zero_usage()}
                 elif runtime.get("goal_tracker") is not None:
                     assurance_context = runtime["goal_tracker"].render_context()
                     model_messages = [*model_messages[:2],
                         {"role": "user", "content": assurance_context}, *model_messages[2:]]
-                available_tools = tool.registry.definitions
-                if reflection and reflection.probe_pending:
-                    available_tools = [definition for definition in available_tools
-                                       if definition.get("function", {}).get("name") == "execute_python"]
-                assistant_message, usage = response_model.generate_tool_calls(
-                    model_messages, available_tools, tool_choice=self.tool_choice
-                )
+                overflow_recoveries = runtime.setdefault("overflow_recoveries", 0)
+                for overflow_attempt in range(3):
+                    try:
+                        assistant_message, usage = response_model.generate_tool_calls(
+                            model_messages, available_tools, tool_choice=self.tool_choice)
+                        break
+                    except SIWCContextOverflowError:
+                        if not isinstance(context_builder, CacheFirstContextBuilder) or overflow_attempt >= 2:
+                            raise
+                        context_builder.force_overflow_compaction(state["messages"])
+                        model_messages, view_stats = context_builder.build(
+                            state["messages"], step=step, max_steps=self.max_steps,
+                            usage=state.get("usage"), max_cost_usd=self.max_cost_usd,
+                            max_input_tokens=self.max_input_tokens,max_output_tokens=self.max_output_tokens,
+                            volatile_context="\n\n".join(volatile_parts) or None,
+                            tool_definitions=available_tools)
+                        overflow_recoveries += 1
+                        runtime["overflow_recoveries"] = overflow_recoveries
+                        trace.append({"task_id":state["task_id"],"step":step,
+                            "event":"overflow_recovery","attempt":overflow_attempt+1,
+                            "estimated_tokens":view_stats.get("estimated_tokens"),
+                            "compact_level":view_stats.get("compact_level")})
                 transport = getattr(response_model, "last_transport", None)
                 if isinstance(transport, dict):
                     trace.append({"task_id": state["task_id"], "step": step,
@@ -364,15 +439,17 @@ class LangGraphAgent:
                             and completion_form not in {"direct", "print"}):
                         reflection.authorized_completion = False
                     if completion_form == "invalid":
-                        blocked_reason = ("Completion protocol error: submit only "
-                                          "apis.supervisor.complete_task(...) as a single statement, "
-                                          "optionally wrapped once in print(...). Do not combine other operations; "
-                                          "no submission was executed.")
+                        blocked_reason = ("Completion protocol error: after writes and readback, submit only "
+                                          "apis.supervisor.complete_task(answer=...) as a single statement "
+                                          "(one print wrapper is allowed). Use a plain answer value without extra units "
+                                          "unless requested, or answer=None for action-only tasks. No submission was executed.")
                         completion_blocked = True
                         trace.append({"task_id": state["task_id"], "step": state["step_count"],
                                       "event": "completion_protocol_rejected",
                                       "tool_call_id": call["id"], "reason": "non_standalone_completion"})
                     elif completion_form in {"direct", "print"}:
+                        if isinstance(context_builder, CacheFirstContextBuilder):
+                            context_builder.close_extraction()
                         reflection_triggered_this_step = True
                         if probe_action:
                             blocked_reason = ("A completion call cannot serve as the uncertainty probe. "
@@ -384,10 +461,10 @@ class LangGraphAgent:
                                           "event": "terminal_reflection_route",
                                           "route": "consume_post_probe_completion_authorization"})
                         elif reflection:
-                            decision, route = reflection.review(
-                                state.get("step_count", 0), "submission",
-                                pending_submission=proposed_code,
-                                requester_boundary=runtime.get("requester_boundary"))
+                            if isinstance(context_builder, CacheFirstContextBuilder):
+                                context_builder.close_extraction()
+                            decision, route = review_terminal(state.get("step_count", 0), "submission",
+                                                              pending_submission=proposed_code)
                             execution_total = _add_usage(execution_total, reflection.last_usage)
                             if route == "allow_existing_checks":
                                 reflection.authorized_completion = True
@@ -403,7 +480,9 @@ class LangGraphAgent:
                                 if route == "one_read_only_probe":
                                     blocked_reason = read_only_probe_feedback(decision)
                                 elif route == "one_bounded_repair":
-                                    blocked_reason = repair_feedback(decision)
+                                    blocked_reason = (audit_feedback(decision)
+                                                      if self.assurance_mode == "reflection_v2"
+                                                      else repair_feedback(decision))
                                 else:
                                     reflection.terminal_blocked = True
                                     blocked_reason = (repair_feedback(decision) +
@@ -512,6 +591,30 @@ class LangGraphAgent:
                                     **receipt, "status": "REPORTED_MATCH" if receipt["match"] else "MISSING",
                                     "source": "post-write AppWorld readback output"}
                                 runtime["lite_unverified_batch"] = not receipt["match"]
+                if self.assurance_mode == "reflection_v2" and function["name"] == "execute_python":
+                    failure = ((outcome.get("execution_summary") or {}).get("first_failure") or {})
+                    for event in tool.last_assurance_events:
+                        operation = str(getattr(getattr(event, "operation_type", None), "value",
+                                                getattr(event, "operation_type", "")))
+                        if operation not in {"READ", "WRITE", "DESTRUCTIVE"}:
+                            continue
+                        status = getattr(event, "execution_status", "unknown")
+                        if operation == "READ" and status != "succeeded":
+                            continue
+                        api_name = getattr(event, "api_name", "unknown")
+                        http_status = getattr(event, "http_status", None)
+                        if http_status is None and failure.get("endpoint") == api_name:
+                            http_status = failure.get("status_code")
+                        runtime["audit_ledger"].append({
+                            "step": getattr(event, "step", state["step_count"]),
+                            "app.endpoint": api_name,
+                            "operation": operation, "status": status,
+                            "http_status": http_status,
+                            "key_parameters": getattr(event, "arguments", {}),
+                            "evidence_ref": getattr(event, "result_reference", None) or call["id"],
+                            "readback_summary": (str(outcome.get("result") or "")[:240]
+                                                  if operation == "READ" else ""),
+                        })
                     if outcome.get("ok") is True:
                         if runtime.get("lite") and executed_requests:
                             error_recovered |= bool(runtime.get("failure_counts"))
@@ -531,7 +634,7 @@ class LangGraphAgent:
                     empty_success = executed_requests == () and outcome.get("result") == "Execution successful."
                     runtime["empty_execution_streak"] = (
                         runtime.get("empty_execution_streak", 0) + 1 if empty_success else 0)
-                if reflection_enabled and function["name"] == "execute_python":
+                if reflection_v1_enabled and function["name"] == "execute_python":
                     hint = pagination_hints(tool.last_assurance_events, tool.api_retriever)
                     if hint:
                         outcome["result"] = f"{outcome.get('result') or ''}\n{hint}"
@@ -568,12 +671,14 @@ class LangGraphAgent:
                         step=state["step_count"], content=messages[-1]["content"],
                         arguments=function["arguments"], outcome=outcome,
                         executed_requests=executed_requests)
+                    if isinstance(context_builder, CacheFirstContextBuilder):
+                        context_builder.record_request_events(call["id"], tool.last_assurance_events)
                     if function["name"] == "execute_python" and runtime.get("assurance_state") is not None:
                         linked = tool.link_assurance_observation(call["id"], record.id)
                         for event in linked:
                             trace.append({"task_id": state["task_id"], "step": event.step,
                                 "event": "execution_assurance_event", **event.as_dict()})
-                    if reflection_enabled and function["name"] == "execute_python":
+                    if reflection_v1_enabled and function["name"] == "execute_python":
                         stdout = str(outcome.get("result") or "")
                         error_output = str(outcome.get("execution_error") or outcome.get("error") or "")
                         reflection.python_outputs.append({
@@ -738,10 +843,10 @@ class LangGraphAgent:
             observation = json.dumps(results, ensure_ascii=False, default=str) if calls else (state.get("protocol_error") or "No tool call was returned.")
             completed = bool(world.task_completed())
             if reflection and probe_action:
+                if isinstance(context_builder, CacheFirstContextBuilder):
+                    context_builder.close_extraction()
                 reflection.probe_pending = False
-                decision, route = reflection.review(
-                    state.get("step_count", 0), "post_probe",
-                    requester_boundary=runtime.get("requester_boundary"))
+                decision, route = review_terminal(state.get("step_count", 0), "post_probe")
                 execution_total = _add_usage(execution_total, reflection.last_usage)
                 boundary_hook = runtime.get("requester_boundary")
                 if boundary_hook is not None:
@@ -785,13 +890,13 @@ class LangGraphAgent:
                                   "limit": self.max_no_progress_steps,
                                   "reason": "No new distinct business evidence, tool information, or error recovery."})
             buffer_threshold = max(1, self.max_steps - 15)
-            if (reflection and not completed and not reflection_triggered_this_step
+            if (reflection_v1_enabled and reflection and not completed and not reflection_triggered_this_step
                     and not reflection.buffer_done
                     and state.get("step_count", 0) >= buffer_threshold):
                 reflection.buffer_done = True
-                decision, route = reflection.review(
-                    state.get("step_count", 0), "reserved_step_buffer",
-                    requester_boundary=runtime.get("requester_boundary"))
+                if isinstance(context_builder, CacheFirstContextBuilder):
+                    context_builder.close_extraction()
+                decision, route = review_terminal(state.get("step_count", 0), "reserved_step_buffer")
                 execution_total = _add_usage(execution_total, reflection.last_usage)
                 feedback = []
                 if route == "one_read_only_probe":
@@ -857,12 +962,19 @@ class LangGraphAgent:
 
     def solve(self, world: Any, *, trace_path: Path) -> AgentState:
         task_id = world.task_id
+        api_retriever = None
+        if (self.enable_api_retrieval and hasattr(world.task, "api_docs")
+                and hasattr(world.task, "allowed_apps")):
+            api_retriever = ApiRetriever(world.task.api_docs, world.task.allowed_apps,
+                                         schema_aware=self.schema_aware_retrieval)
         context = ContextManager(task_id, world.task.instruction,
                                  schema_aware_retrieval=self.schema_aware_retrieval,
                                  programmatic_execution=self.programmatic_execution,
                                  context_mode=self.context_mode,
                                  unified_config=self.unified_config if self.context_mode == "unified" else None,
-                                 assurance_mode=self.assurance_mode)
+                                 assurance_mode=self.assurance_mode,
+                                 app_catalog=app_capability_catalog(api_retriever)
+                                 if api_retriever else None)
         trace = TraceLogger(trace_path)
         planner_usage = _zero_usage()
         planner_calls = 0
@@ -881,16 +993,16 @@ class LangGraphAgent:
                                "total_usage": planner_usage, "model_response": "",
                                "pending_tool_calls": [], "protocol_retry_count": 0,
                                "tool_call_count": 0, "python_execution_count": 0}
-        run_runtime = None
+        run_runtime = {"api_retriever": api_retriever} if api_retriever else None
         if self.max_input_tokens is not None and planner_usage.get("input_tokens", 0) >= self.max_input_tokens:
             result = {**initial, "stop_reason": "input_token_budget_exceeded", "finished": True}
         elif planner_usage.get("cost_usd", 0) >= self.max_cost_usd or planner_usage.get("output_tokens", 0) >= self.max_output_tokens:
             result = {**initial, "stop_reason": "planner_budget_exceeded", "finished": True}
         else:
-            run_runtime = ({"lite": True, "assurance_enabled": True,
-                            "assurance_plan": plan, "assurance_mode": self.assurance_mode,
-                            "plan": plan}
-                           if self.plan_guided_react else None)
+            if self.plan_guided_react:
+                run_runtime = {**(run_runtime or {}), "lite": True, "assurance_enabled": True,
+                               "assurance_plan": plan, "assurance_mode": self.assurance_mode,
+                               "plan": plan}
             graph = self.build_graph(world, trace, runtime=run_runtime)
             try:
                 result = graph.invoke(initial,
@@ -913,7 +1025,7 @@ class LangGraphAgent:
                 "mode": self.assurance_mode,
                 **((run_runtime or {})["terminal_reflection"].summary()
                    if (run_runtime or {}).get("terminal_reflection") else {}),
-            }} if self.assurance_mode == "reflection_v1" else {}),
+            }} if self.assurance_mode in {"reflection_v1", "reflection_v2"} else {}),
             "execution_assurance": (run_runtime["assurance_state"].snapshot()
                                      if self.plan_guided_react and (run_runtime or {}).get("assurance_state") is not None
                                      else None),
@@ -923,6 +1035,10 @@ class LangGraphAgent:
                 result.get("step_count", 0) + planner_calls +
                 ((run_runtime or {}).get("terminal_reflection").calls
                  if (run_runtime or {}).get("terminal_reflection") else 0)),
+            "async_extraction": ((run_runtime or {}).get("context_builder").extraction_summary()
+                if isinstance((run_runtime or {}).get("context_builder"), CacheFirstContextBuilder)
+                else None),
+            "overflow_recoveries": (run_runtime or {}).get("overflow_recoveries", 0),
             "stop_reason": result.get("stop_reason"),
             "task_completed_signal": bool(world.task_completed()), "error": result.get("error"),
             "total_usage": result.get("total_usage", _zero_usage()),

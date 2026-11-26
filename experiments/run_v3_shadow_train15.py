@@ -109,8 +109,8 @@ def _task_result(task_id: str, wave: int, exit_code: int, task_dir: Path) -> dic
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the frozen Train-15 under V3 or reflection_v1.")
-    parser.add_argument("--assurance-mode", choices=("shadow", "reflection_v1"),
+    parser = argparse.ArgumentParser(description="Run the frozen Train-15 under V3 or a Reflection audit mode.")
+    parser.add_argument("--assurance-mode", choices=("shadow", "reflection_v1", "reflection_v2"),
                         default=CONFIG["execution_assurance_mode"])
     args = parser.parse_args()
     from appworld import load_task_ids

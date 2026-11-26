@@ -204,8 +204,8 @@ class ExecutionAssuranceState:
     plan_valid: bool = True
 
     def __post_init__(self) -> None:
-        if self.mode not in {"shadow", "enforce", "reflection_v1"}:
-            raise ValueError("assurance mode must be shadow, enforce, or reflection_v1")
+        if self.mode not in {"shadow", "enforce", "reflection_v1", "reflection_v2"}:
+            raise ValueError("assurance mode must be shadow, enforce, reflection_v1, or reflection_v2")
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -519,7 +519,7 @@ class OutcomeGate:
                            status="succeeded" if success else "failed", operation=operation,
                            gate=decision, http_status=http_status,
                             reason=None if success else "requester_returned_non_success_status",
-                            response_item_count=(len(result) if self.state.mode == "reflection_v1"
+                            response_item_count=(len(result) if self.state.mode in {"reflection_v1", "reflection_v2"}
                                                  and isinstance(result, list) else None))
         return result
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from agentlab.agent.react import LangGraphAgent
 from agentlab.execution_assurance.assurance import read_only_probe_allowed
-from agentlab.execution_assurance.reflection import read_only_probe_feedback
+from agentlab.execution_assurance.reflection import TerminalReflection, read_only_probe_feedback
 
 
 PLAN = {"phases": ["Perform the requested work", "Submit"],
@@ -152,6 +152,37 @@ def test_reflection_pass_allows_existing_completion_guard(tmp_path):
                                if names == ["submit_terminal_reflection"])
     assert len(reflection_messages) == 2
     assert "original_task" in reflection_messages[1]["content"]
+
+
+def test_reflection_v1_deterministic_answer_precheck_has_separate_budget():
+    class Model:
+        def __init__(self): self.calls = 0
+        def generate_tool_calls(self, *_args, **_kwargs):
+            self.calls += 1
+            return _reflection("MISSING", issue="One evidence gap remains."), {
+                "input_tokens": 7, "input_cache_hit_tokens": 0, "output_tokens": 2, "cost_usd": 0.0}
+
+    for answer in ("Unable to verify the total", "$12 USD"):
+        class Trace:
+            events = []
+            def append(self, event): self.events.append(event)
+        model, trace = Model(), Trace()
+        reviewer = TerminalReflection(model, trace, "format-test", "What is the total amount?")
+        code = f"apis.supervisor.complete_task(answer={answer!r})"
+        decision, route = reviewer.review(1, "submission", pending_submission=code)
+        assert decision["status"] == "MISSING" and route == "one_bounded_repair"
+        assert trace.events[-1]["deterministic_precheck"] is True
+        assert reviewer.format_repair_rounds == 1
+        assert reviewer.repair_rounds == reviewer.calls == model.calls == 0
+        if answer != "Unable to verify the total":
+            continue
+        # A later well-formed answer still gets its semantic Reflection opportunity.
+        reviewer.instruction = "Read the item and finish the requested action."
+        decision, route = reviewer.review(
+            2, "submission", pending_submission="apis.supervisor.complete_task(answer=None)")
+        assert model.calls == reviewer.calls == 1
+        assert reviewer.repair_rounds == 1 and reviewer.format_repair_rounds == 1
+        assert route == "one_bounded_repair" and decision["status"] == "MISSING"
 
 
 def test_missing_and_conflict_each_get_one_repair_then_pass(tmp_path):

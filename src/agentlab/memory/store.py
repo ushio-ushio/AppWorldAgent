@@ -117,7 +117,7 @@ class ObservationStore:
         return self._records.get(observation_id)
 
     def read_observation(self, observation_id: str, offset: int = 0,
-                         limit: int = 2048, field: str = "content") -> dict[str, Any]:
+                         limit: int = 1600, field: str = "content") -> dict[str, Any]:
         record = self._records.get(observation_id)
         if record is None:
             raise ValueError("Unknown observation ID for this task")

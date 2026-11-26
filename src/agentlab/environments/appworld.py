@@ -23,7 +23,8 @@ class AppWorldTool:
                  working_memory: WorkingMemory | None = None,
                  task_state: TaskState | None = None,
                  manual_retrieval: bool = True, schema_aware_retrieval: bool = False,
-                 outcome_gate: Any | None = None):
+                 outcome_gate: Any | None = None,
+                 api_retriever: ApiRetriever | None = None):
         self.world = world
         self.last_operation_fingerprints: list[tuple[str, str]] = []
         self.observed_write_fingerprints: set[str] = set()
@@ -32,8 +33,11 @@ class AppWorldTool:
         self.assurance_step = 0
         self.assurance_call_id: str | None = None
         self.last_assurance_events: list[Any] = []
-        self.api_retriever = None
-        if enable_api_retrieval and hasattr(world.task, "api_docs") and hasattr(world.task, "allowed_apps"):
+        self.last_execution_summary: dict[str, Any] | None = None
+        self.consecutive_401: dict[str, int] = {}
+        self.api_retriever = api_retriever
+        if (self.api_retriever is None and enable_api_retrieval
+                and hasattr(world.task, "api_docs") and hasattr(world.task, "allowed_apps")):
             self.api_retriever = ApiRetriever(world.task.api_docs, world.task.allowed_apps,
                                               schema_aware=schema_aware_retrieval)
         self.request_parser = None
@@ -44,6 +48,7 @@ class AppWorldTool:
             search_api=self._search_api,
             get_api_schema=self._get_api_schema,
             execute_python=self.execute_python,
+            execution_summary_provider=lambda: self.last_execution_summary,
             api_retrieval_enabled=enable_api_retrieval,
             schema_aware_retrieval=schema_aware_retrieval,
             search_history=observation_store.search_history if observation_store and manual_retrieval else None,
@@ -54,10 +59,13 @@ class AppWorldTool:
             update_task_state=task_state.update_task_state if task_state else None,
         )
 
-    def _search_api(self, query: str, app: str | None = None, top_k: int = 5) -> list[dict[str, Any]]:
+    def _search_api(self, query: str | None = None, app: str | None = None, top_k: int = 5,
+                    queries: list[str] | None = None,
+                    app_name: str | None = None) -> Any:
         if self.api_retriever is None:
             raise RuntimeError("API retrieval is disabled for this run.")
-        return self.api_retriever.search_api(query=query, app=app, top_k=top_k)
+        return self.api_retriever.search_api(query=query, app=app, top_k=top_k,
+                                             queries=queries, app_name=app_name)
 
     def _get_api_schema(self, api_name: str) -> dict[str, Any] | None:
         if self.api_retriever is None:
@@ -65,6 +73,7 @@ class AppWorldTool:
         return self.api_retriever.get_api_schema(api_name)
 
     def execute_python(self, code: str) -> tuple[str, str | None]:
+        self.last_execution_summary = None
         if (self.outcome_gate is not None and self.outcome_gate.state.mode == "enforce"
                 and not self.assurance_boundary_available):
             message = ("Execution Assurance is in enforce mode, but this environment has no verified "
@@ -81,7 +90,7 @@ class AppWorldTool:
                     return ("Write operation blocked because this exact operation was already attempted; inspect its prior Observation before deciding what to do.",
                             "write_replay_blocked")
         self.last_operation_fingerprints = fingerprints
-        requester = getattr(self.world, "requester", None) if fingerprints else None
+        requester = getattr(self.world, "requester", None)
         requester_rows = getattr(requester, "requests", None)
         request_start = len(requester_rows) if isinstance(requester_rows, list) else 0
         if self.outcome_gate is not None and self.assurance_call_id:
@@ -102,10 +111,53 @@ class AppWorldTool:
         # replay ledger merely because the source code mentioned a write API.
         requests_after = getattr(requester, "requests", None)
         parser = self.request_parser
+        requests = ()
+        if (parser is not None and isinstance(requester_rows, list)
+                and requests_after is requester_rows and len(requests_after) > request_start):
+            requests = parser.request_evidence(requests_after[request_start:])
+        events = self.last_assurance_events
+        inferred_status = None
+        if error:
+            import re
+            status_match = re.search(r"Response status code is (\d{3})", error)
+            inferred_status = int(status_match.group(1)) if status_match else None
+        inferred_assigned = False
+        for event in events:
+            api_name = str(getattr(event, "api_name", ""))
+            app_name = api_name.split(".", 1)[0].lower()
+            status_code = getattr(event, "http_status", None)
+            if (status_code is None and not inferred_assigned
+                    and getattr(event, "execution_status", "") == "failed"):
+                status_code = inferred_status
+                inferred_assigned = inferred_status is not None
+            if getattr(event, "execution_status", "") == "succeeded":
+                self.consecutive_401.pop(app_name, None)
+            elif status_code == 401 and app_name:
+                self.consecutive_401[app_name] = self.consecutive_401.get(app_name, 0) + 1
+        if error or any(getattr(event, "execution_status", "") != "succeeded" for event in events):
+            successes = [event for event in events if event.execution_status == "succeeded"]
+            failures = [event for event in events if event.execution_status in {"failed", "blocked", "unknown"}]
+            first = failures[0] if failures else None
+            self.last_execution_summary = {
+                "total_calls": max(len(requests), len(events)),
+                "succeeded_calls": len(successes), "failed_calls": len(failures),
+                "succeeded_mutations": [event.api_name for event in successes
+                    if str(getattr(event.operation_type, "value", event.operation_type)) in {"WRITE", "DESTRUCTIVE"}
+                    and not event.api_name.endswith((".login", ".logout", ".complete_task"))],
+                "first_failure": ({"endpoint": first.api_name, "status_code": first.http_status,
+                                   "error": first.reason} if first else None),
+                "consecutive_401": dict(self.consecutive_401),
+            }
+            if first and self.last_execution_summary["first_failure"]["status_code"] is None and inferred_status:
+                self.last_execution_summary["first_failure"]["status_code"] = inferred_status
+            if first and self.last_execution_summary["first_failure"]["status_code"] is None and error:
+                import re
+                status = re.search(r"Response status code is (\d{3})", error)
+                if status:
+                    self.last_execution_summary["first_failure"]["status_code"] = int(status.group(1))
         if (fingerprints and parser is not None and hasattr(parser, "request_evidence") and
                 isinstance(requester_rows, list) and requests_after is requester_rows and
                 len(requests_after) > request_start):
-            requests = parser.request_evidence(requests_after[request_start:])
             for fingerprint, api_name in _executed_write_fingerprints(fingerprints, requests):
                 self.observed_write_fingerprints.add(fingerprint)
         return observation, error

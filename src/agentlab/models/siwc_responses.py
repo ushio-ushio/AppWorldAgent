@@ -5,6 +5,7 @@ import json
 import os
 import random
 import time
+import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -46,12 +47,19 @@ class SIWCTransportError(SIWCError):
         super().__init__("SIWC transport failed: " + phase + " (" + error_class + ")")
 
 
+class SIWCContextOverflowError(SIWCError):
+    """HTTP 400 explicitly reporting that the submitted context is too large."""
+
+
 class ChatGPTResponsesAdapter:
     def __init__(self, model_name: str | None = None, *, timeout_seconds: int = 90,
-                 connect_timeout_seconds: int = 20):
+                 connect_timeout_seconds: int = 20, session_id: str | None = None):
         self.timeout_seconds = timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
         self.max_transport_retries = 3
+        self.session_id = session_id or str(uuid.uuid4())
+        if not self.session_id.strip():
+            raise ValueError("session_id must be non-empty")
         # Each AppWorld worker owns one adapter. Reuse its proxy/TLS pool across
         # model turns instead of constructing a new Session for every request.
         self._session = requests.Session()
@@ -151,6 +159,8 @@ class ChatGPTResponsesAdapter:
 
     def _request(self, method: str, endpoint: str, *, body: dict | None = None,
                  stream: bool = False, _retry_state: dict | None = None):
+        if not getattr(self, "session_id", None):
+            self.session_id = str(uuid.uuid4())
         state = _retry_state if _retry_state is not None else {"attempt": 0, "history": []}
         max_attempts = getattr(self, "max_transport_retries", 3) + 1
         retryable_statuses = {408, 429, 500, 502, 503, 504}
@@ -158,7 +168,8 @@ class ChatGPTResponsesAdapter:
             state["attempt"] += 1
             try:
                 result = self._session.request(method, RESOURCE + endpoint,
-                    headers={"Authorization": "Bearer " + access_token(), "Content-Type": "application/json"},
+                    headers={"Authorization": "Bearer " + access_token(), "Content-Type": "application/json",
+                             "session-id": self.session_id},
                     json=body, stream=stream,
                     timeout=(self.connect_timeout_seconds, self.timeout_seconds))
             except SIWCError as exc:
@@ -208,6 +219,15 @@ class ChatGPTResponsesAdapter:
                 raise error
             if result.status_code != 200:
                 code = result.status_code
+                if code == 400:
+                    try:
+                        payload_text = json.dumps(result.json(), ensure_ascii=False).lower()
+                    except Exception:
+                        payload_text = ""
+                    if any(term in payload_text for term in ("context_length_exceeded", "maximum context length",
+                            "context window", "reduce the length")):
+                        result.close()
+                        raise SIWCContextOverflowError("SIWC request context exceeded the model window")
                 result.close()
                 error = self._http_error(code)
                 self._attach_retries(error, state, phase="http_response", status_code=code)
@@ -264,6 +284,8 @@ class ChatGPTResponsesAdapter:
         body = {"model": self.model_name,
                 "input": [self._tools(tools), *self._input(messages)],
                 "store": False, "stream": True}
+        if getattr(self, "prompt_cache_key", None):
+            body["prompt_cache_key"] = self.prompt_cache_key
         started = _wall_seconds()
         request_bytes = len(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"))
         retry_state = {"attempt": 0, "history": []}
@@ -363,3 +385,37 @@ class ChatGPTResponsesAdapter:
             self.last_transport.update(transport_retry_count=len(retry_state["history"]),
                                        transport_retries=retry_state["history"])
         return {"role": "assistant", "content": "".join(texts) or None, "tool_calls": calls}, usage
+
+    def extract_context(self, messages: list[dict[str, Any]],
+                        tools: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any], dict[str, int]]:
+        """Run a no-tools semantic extraction using an isolated HTTP session."""
+        body = {"model": self.model_name,
+                "input": [self._tools(tools or []), *self._input(messages)],
+                "store": False, "stream": True}
+        session = requests.Session()
+        try:
+            response = session.request("POST", RESOURCE + "/responses",
+                headers={"Authorization": "Bearer " + access_token(),
+                         "Content-Type": "application/json", "session-id": self.session_id},
+                json=body, stream=True, timeout=(self.connect_timeout_seconds, self.timeout_seconds))
+            if response.status_code != 200:
+                raise SIWCError(f"SIWC extraction HTTP {response.status_code}")
+            completed = None
+            for line in response.iter_lines(decode_unicode=True):
+                if isinstance(line, bytes): line = line.decode("utf-8", errors="replace")
+                if line and line.startswith("data: ") and line != "data: [DONE]":
+                    event = json.loads(line[6:])
+                    if event.get("type") == "response.completed": completed = event.get("response")
+            if not completed: raise SIWCError("SIWC extraction stream incomplete")
+            text = "".join(part.get("text", "") for item in completed.get("output", [])
+                           if item.get("type") == "message" for part in item.get("content", [])
+                           if part.get("type") == "output_text")
+            raw_usage = completed.get("usage") or {}
+            usage = {"input_tokens": int(raw_usage.get("input_tokens", 0)),
+                     "cached_tokens": int(raw_usage.get("input_tokens_details", {}).get("cached_tokens", 0)),
+                     "output_tokens": int(raw_usage.get("output_tokens", 0))}
+            return json.loads(text), usage
+        finally:
+            try: response.close()
+            except UnboundLocalError: pass
+            session.close()

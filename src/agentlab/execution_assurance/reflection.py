@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from agentlab.runtime.trace import _add_usage, _redact, _zero_usage
+from agentlab.execution_assurance.reflection_v2 import deterministic_answer_gap, submission_value
 
 
 REFLECTION_TOOL = [{
@@ -151,6 +152,7 @@ class TerminalReflection:
         self.actions: list[dict[str, Any]] = []
         self.python_outputs: list[dict[str, Any]] = []
         self.calls = self.probe_rounds = self.repair_rounds = 0
+        self.format_repair_rounds = 0
         self.probe_pending = self.authorized_completion = False
         self.buffer_done = self.buffer_guard_pending = self.terminal_blocked = False
         self.buffer_guard_done = False
@@ -168,41 +170,54 @@ class TerminalReflection:
         started = perf_counter()
         fallback = raw_json = None
         self.last_usage = _zero_usage()
-        try:
-            response, self.last_usage = self.model.generate_tool_calls(
-                [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
-                 {"role": "user", "content": packed}], REFLECTION_TOOL, tool_choice="required")
-            decision, raw_json, error = parse_reflection(response)
-            fallback = error
-        except Exception as exc:
-            decision, fallback = None, type(exc).__name__
-        self.calls += 1
+        answer, answer_type = submission_value(pending_submission)
+        format_gap = (deterministic_answer_gap(self.instruction, answer, answer_type)
+                      if pending_submission is not None else None)
+        if format_gap:
+            decision = {"status": "MISSING", "issue": format_gap,
+                        "evidence": [], "next_action": "Resubmit the supported answer as a plain scalar, or answer=None for an action-only task."}
+            if self.format_repair_rounds < 1:
+                self.format_repair_rounds += 1
+                route = "one_bounded_repair"
+            else:
+                route = "repair_budget_exhausted"
+        else:
+            try:
+                response, self.last_usage = self.model.generate_tool_calls(
+                    [{"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
+                     {"role": "user", "content": packed}], REFLECTION_TOOL, tool_choice="required")
+                decision, raw_json, error = parse_reflection(response)
+                fallback = error
+            except Exception as exc:
+                decision, fallback = None, type(exc).__name__
+            self.calls += 1
         self.total_usage = _add_usage(self.total_usage, self.last_usage)
-        if decision is None:
+        if not format_gap and decision is None:
             decision = {"status": "PASS", "issue": "", "evidence": [],
                         "next_action": "Proceed through the existing deterministic completion checks."}
-        elif decision["status"] == "UNCERTAIN" and self.probe_rounds >= 1:
+        elif not format_gap and decision["status"] == "UNCERTAIN" and self.probe_rounds >= 1:
             decision = {**decision, "status": "MISSING",
                         "issue": decision.get("issue") or
                                 "The one allowed read-only probe did not resolve this uncertainty.",
                         "next_action": decision.get("next_action") or
                                       "Do not assume completion; repair only with new, safe evidence."}
 
-        if decision["status"] == "PASS":
-            route = "allow_existing_checks"
-        elif decision["status"] == "UNCERTAIN":
-            if requester_boundary is None or not requester_boundary.available:
-                decision = {**decision, "status": "MISSING",
-                            "issue": "The Requester interception boundary is unavailable; a protected read-only probe cannot run.",
-                            "next_action": "Use collected evidence, make a safe repair if supported, or stop without claiming completion."}
-                route = self._repair_or_stop()
+        if not format_gap:
+            if decision["status"] == "PASS":
+                route = "allow_existing_checks"
+            elif decision["status"] == "UNCERTAIN":
+                if requester_boundary is None or not requester_boundary.available:
+                    decision = {**decision, "status": "MISSING",
+                                "issue": "The Requester interception boundary is unavailable; a protected read-only probe cannot run.",
+                                "next_action": "Use collected evidence, make a safe repair if supported, or stop without claiming completion."}
+                    route = self._repair_or_stop()
+                else:
+                    self.probe_rounds += 1
+                    self.probe_pending = True
+                    requester_boundary.set_read_only(True)
+                    route = "one_read_only_probe"
             else:
-                self.probe_rounds += 1
-                self.probe_pending = True
-                requester_boundary.set_read_only(True)
-                route = "one_read_only_probe"
-        else:
-            route = self._repair_or_stop()
+                route = self._repair_or_stop()
 
         self.trace.append({
             "task_id": self.task_id, "step": step, "event": "terminal_reflection",
@@ -214,8 +229,10 @@ class TerminalReflection:
                                  "package_bytes": len(packed.encode("utf-8"))},
             "raw_json": raw_json, "decision": decision,
             "fallback": fallback is not None, "fallback_reason": fallback,
+            "deterministic_precheck": bool(format_gap),
             "route": route, "probe_rounds": self.probe_rounds,
-            "repair_rounds": self.repair_rounds, "usage": self.last_usage,
+            "repair_rounds": self.repair_rounds,
+            "format_repair_rounds": self.format_repair_rounds, "usage": self.last_usage,
             "elapsed_seconds": round(perf_counter() - started, 3),
             **({"adapter_transport": getattr(self.model, "last_transport", None)}
                if isinstance(getattr(self.model, "last_transport", None), dict) else {}),
@@ -232,4 +249,5 @@ class TerminalReflection:
     def summary(self) -> dict[str, Any]:
         return {"calls": self.calls, "probe_rounds": self.probe_rounds,
                 "repair_rounds": self.repair_rounds, "total_usage": self.total_usage,
+                "format_repair_rounds": self.format_repair_rounds,
                 "buffer_checkpoint_triggered": self.buffer_done}

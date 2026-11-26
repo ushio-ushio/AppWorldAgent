@@ -122,7 +122,11 @@ class TestSchemaAwareRetrieval(unittest.TestCase):
     def test_disabled_schema_mode_preserves_search_result_shape(self):
         retriever = ApiRetriever(self.docs, ["phone"])
         self.assertEqual(set(retriever.search_api("list records")[0]),
-                         {"api_name", "description", "score"})
+                         {"api_name", "description", "score", "parameter_hint"})
+        self.assertIn("required page:integer,access_token:string",
+                      retriever.search_api("list records")[0]["parameter_hint"])
+        self.assertIn("optional limit:integer",
+                      retriever.search_api("list records")[0]["parameter_hint"])
 
     def test_distinct_loop_batches_have_distinct_write_fingerprints(self):
         retriever = ApiRetriever(self.docs, ["phone"])
