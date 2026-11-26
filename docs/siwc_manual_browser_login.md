@@ -35,4 +35,4 @@ $repo = 'D:\worldapp'
 ## 实现入口
 
 - `scripts/siwc_manual_login.py`：手动粘贴授权链接的启动入口。
-- `src/agentlab/models/siwc_auth.py::login(open_browser=False)`：不启动浏览器，只输出授权链接并等待本机回调；仍执行原有 OAuth 校验和 DPAPI 保存逻辑。
+- `src/models/siwc_auth.py::login(open_browser=False)`：不启动浏览器，只输出授权链接并等待本机回调；仍执行原有 OAuth 校验和 DPAPI 保存逻辑。

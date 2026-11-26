@@ -1,10 +1,10 @@
 import json
 from types import SimpleNamespace
 
-from agentlab.context_engineering.context import CacheFirstContextBuilder
-from agentlab.memory.store import ObservationStore
-from agentlab.tool_engineering.tools import ApiRetriever, ToolRegistry
-from agentlab.environments.appworld import AppWorldTool
+from context_engineering.context import CacheFirstContextBuilder
+from memory.store import ObservationStore
+from tool_engineering.tools import ApiRetriever, ToolRegistry
+from environments.appworld import AppWorldTool
 
 
 DOCS = {"demo": {

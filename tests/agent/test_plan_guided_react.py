@@ -2,17 +2,17 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agentlab.agent.react import LangGraphAgent
-from agentlab.environments.appworld import AppWorldTool
-from agentlab.agent.prompt import ContextManager
-from agentlab.execution_assurance.recovery import (_correction_recovered,
+from agent.react import LangGraphAgent
+from environments.appworld import AppWorldTool
+from agent.prompt import ContextManager
+from execution_assurance.recovery import (_correction_recovered,
                            _guard_blocking_correction, _local_correction,
                            _same_target_readback)
-from agentlab.execution_assurance.completion_guard import CompletionGuard, batch_set_difference
-from agentlab.agent.planner import PLAN_TOOL, one_shot_plan
-from agentlab.models.siwc_responses import SIWCTransportError
-from agentlab.tool_engineering.tools import ToolRegistry
-from agentlab.context_engineering.unified import UnifiedContextConfig
+from execution_assurance.completion_guard import CompletionGuard, batch_set_difference
+from agent.planner import PLAN_TOOL, one_shot_plan
+from models.siwc_responses import SIWCTransportError
+from tool_engineering.tools import ToolRegistry
+from context_engineering.unified import UnifiedContextConfig
 
 
 def action(name, arguments, call_id):

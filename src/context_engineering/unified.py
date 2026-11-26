@@ -7,12 +7,12 @@ import re
 from time import perf_counter
 from typing import Any
 
-from agentlab.context_engineering.dynamic import DynamicContextBuilder
-from agentlab.memory.store import ObservationStore
-from agentlab.runtime.task_state import TaskState
-from agentlab.context_engineering.compaction import TrajectoryCompactor
-from agentlab.memory.store import WorkingMemory
-from agentlab.tool_engineering.tools import _tokens
+from context_engineering.dynamic import DynamicContextBuilder
+from memory.store import ObservationStore
+from runtime.task_state import TaskState
+from context_engineering.compaction import TrajectoryCompactor
+from memory.store import WorkingMemory
+from tool_engineering.tools import _tokens
 
 
 def _bytes(value: Any) -> int:

@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("APPWORLD_ROOT", str(ROOT / "vendor" / "appworld"))
 os.environ.setdefault("APPWORLD_CACHE", str(Path(os.environ["APPWORLD_ROOT"]) / ".tmp" / "agent-cache"))
 
-from agentlab.evaluation.report import parse_report_counts  # noqa: E402
+from evaluation.report import parse_report_counts  # noqa: E402
 
 EXPLORATION_TOOLS = {"search_api", "get_api_schema", "read_observation", "search_history"}
 
@@ -540,8 +540,8 @@ def evaluate_official(task_id: str, experiment: str) -> str:
 
 
 def _credential_preflight(model_name: str | None) -> None:
-    from agentlab.models.siwc_auth import access_token
-    from agentlab.models.siwc_responses import ChatGPTResponsesAdapter
+    from models.siwc_auth import access_token
+    from models.siwc_responses import ChatGPTResponsesAdapter
     access_token()
     adapter = ChatGPTResponsesAdapter(model_name)
     adapter.close()

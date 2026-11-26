@@ -12,7 +12,7 @@ from typing import Any
 
 import requests
 
-from agentlab.models.siwc_auth import RESOURCE, SIWCError, access_token
+from models.siwc_auth import RESOURCE, SIWCError, access_token
 
 
 if os.name == "nt":

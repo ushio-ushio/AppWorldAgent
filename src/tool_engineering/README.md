@@ -74,11 +74,11 @@
 
 | 模块文件                                      | 职责                                                                                                                                                               |
 | :-------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/agentlab/tool_engineering/tools.py`      | 工具 Schema 注册、`ApiRetriever` 本地文档索引、`search_api`/`get_api_schema` 紧凑渲染与分页标记、`ToolRegistry.dispatch()` 错误自愈信封与 `execution_summary` 封装 |
-| `src/agentlab/environments/appworld.py`       | `AppWorldTool.execute_python()` 执行前后 Requester 增量切片与部分成功摘要采集                                                                                      |
-| `src/agentlab/memory/store.py`                | `ObservationStore.read_observation()` 默认页大小（`limit=1600`）与原始数据外置读取                                                                                 |
-| `src/agentlab/context_engineering/context.py` | `_freeze_output()` 中 `read_observation` 的免二次 L3 卸载豁免                                                                                                      |
-| `src/agentlab/agent/react.py`                 | Finish Protocol 拦截提示文案对齐（不改`reflection_v1` 校验逻辑）                                                                                                   |
+| `src/tool_engineering/tools.py`      | 工具 Schema 注册、`ApiRetriever` 本地文档索引、`search_api`/`get_api_schema` 紧凑渲染与分页标记、`ToolRegistry.dispatch()` 错误自愈信封与 `execution_summary` 封装 |
+| `src/environments/appworld.py`       | `AppWorldTool.execute_python()` 执行前后 Requester 增量切片与部分成功摘要采集                                                                                      |
+| `src/memory/store.py`                | `ObservationStore.read_observation()` 默认页大小（`limit=1600`）与原始数据外置读取                                                                                 |
+| `src/context_engineering/context.py` | `_freeze_output()` 中 `read_observation` 的免二次 L3 卸载豁免                                                                                                      |
+| `src/agent/react.py`                 | Finish Protocol 拦截提示文案对齐（不改`reflection_v1` 校验逻辑）                                                                                                   |
 
 ---
 

@@ -7,7 +7,7 @@ import re
 from time import perf_counter
 from typing import Any
 
-from agentlab.runtime.trace import _add_usage, _redact, _zero_usage
+from runtime.trace import _add_usage, _redact, _zero_usage
 
 
 AUDITOR_SYSTEM_PROMPT = """You are an independent AppWorld completion auditor. Use only the original instruction, the objective Requester ledger, and the proposed answer. Do not infer facts from executor reasoning, code, search history, or claims. Process in order: original instruction -> atomic conditions (people/scope, time boundaries, exclusions, prerequisites such as backup-before-delete) -> compare each condition with objective ledger evidence -> verdict. Return PASS only when every applicable condition is supported; FAIL for a concrete unmet or conflicting condition; UNCERTAIN when the ledger cannot establish a material condition. For action-only tasks with verified business state require answer=None; never accept explanatory prose. For questions return only the requested scalar/entity value. Return one submit_terminal_audit call with verdict, evidence_gaps, and next_verification. Keep the structured JSON concise (under 1500 characters); the executor receives a shorter extracted summary."""

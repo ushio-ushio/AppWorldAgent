@@ -1,7 +1,7 @@
 import json
 
-from agentlab.agent.react import LangGraphAgent
-from agentlab.tool_engineering.tools import ApiRetriever, ToolRegistry
+from agent.react import LangGraphAgent
+from tool_engineering.tools import ApiRetriever, ToolRegistry
 
 
 def _call(call_id, name, args):

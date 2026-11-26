@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from agentlab.agent.react import LangGraphAgent
-from agentlab.execution_assurance.assurance import read_only_probe_allowed
-from agentlab.execution_assurance.reflection import TerminalReflection, read_only_probe_feedback
+from agent.react import LangGraphAgent
+from execution_assurance.assurance import read_only_probe_allowed
+from execution_assurance.reflection import TerminalReflection, read_only_probe_feedback
 
 
 PLAN = {"phases": ["Perform the requested work", "Submit"],

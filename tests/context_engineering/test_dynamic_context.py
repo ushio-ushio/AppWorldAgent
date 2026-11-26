@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentlab.context_engineering.dynamic import DynamicContextBuilder
-from agentlab.memory.store import ObservationStore
-from agentlab.agent.react import LangGraphAgent
+from context_engineering.dynamic import DynamicContextBuilder
+from memory.store import ObservationStore
+from agent.react import LangGraphAgent
 
 
 class StoreTests(unittest.TestCase):

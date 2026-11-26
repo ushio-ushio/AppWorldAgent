@@ -117,7 +117,7 @@ Phase 2 在 cache_first 运行路径加入轻量 Token Meter 和不可变 L1 Che
 **Plaintext**
 
 ```
-src/agentlab/context_engineering/
+src/context_engineering/
 ├── README.md        # 本架构规格书
 ├── context.py       # [Phase 1] CacheFirstContextBuilder：L0冻结、L2只追加、L3入口卸载、即时报错裁剪、Volatile Tail
 ├── compaction.py    # [Phase 2] 保留旧 TrajectoryCompactor；新增不可变 L1 Shard 提交与双游标 EpochCompactor
@@ -145,4 +145,4 @@ src/agentlab/context_engineering/
 
 Phase 4 在 cache_first 独立路径增加高压 Level 3：当上下文估算达到硬容量的可配置比例时，将 L1 合并为单个 `CP-MASTER-01`，保留写操作证据、实体、事实、未解决项和 Observation ID 索引。SIWC 明确报告上下文超限时，Runtime 在同一 ReAct 步内执行有界紧急压缩并重放请求；传输层瞬态错误继续由 SIWC 传输重试负责。
 
-后台 Clone 提取受增量节流：越过软水位后，默认至少新增 4 组交互且估算输入增长 3,500 Token 才再次提交。使用 `python -m agentlab.context_engineering.replay <trace.jsonl>` 做离线相邻步 LCP、压缩次数、溢出恢复及缓存效率诊断。Trace 未含原始请求快照时，工具只报告可从现有 Meter 可靠恢复的指标，不伪造首差异位置。
+后台 Clone 提取受增量节流：越过软水位后，默认至少新增 4 组交互且估算输入增长 3,500 Token 才再次提交。使用 `python -m context_engineering.replay <trace.jsonl>` 做离线相邻步 LCP、压缩次数、溢出恢复及缓存效率诊断。Trace 未含原始请求快照时，工具只报告可从现有 Meter 可靠恢复的指标，不伪造首差异位置。

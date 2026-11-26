@@ -1,7 +1,7 @@
 import unittest
 
-from agentlab.agent.prompt import ContextManager
-from agentlab.runtime.trace import _redact
+from agent.prompt import ContextManager
+from runtime.trace import _redact
 
 
 class TestAgentContext(unittest.TestCase):

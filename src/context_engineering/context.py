@@ -7,9 +7,9 @@ import hashlib
 import json
 from typing import Any, Iterable
 
-from agentlab.memory.store import ObservationStore
-from agentlab.runtime.trace import _redact
-from agentlab.context_engineering.compaction import EpochCompactor
+from memory.store import ObservationStore
+from runtime.trace import _redact
+from context_engineering.compaction import EpochCompactor
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ class CacheFirstContextBuilder:
         self.meter = TokenMeter(self.config)
         self.compactor = EpochCompactor(store, keep_recent_groups=self.config.keep_recent_groups)
         self._archived_ranges: list[tuple[int, int]] = []
-        from agentlab.context_engineering.extraction import AsyncContextExtractor
+        from context_engineering.extraction import AsyncContextExtractor
         self.extractor = (AsyncContextExtractor(model) if model is not None and
                           self.config.enable_async_extraction and
                           callable(getattr(model, "extract_context", None)) else None)
@@ -328,7 +328,7 @@ class CacheFirstContextBuilder:
                        self._runtime_tail(step=step,max_steps=max_steps,usage=usage,max_cost_usd=max_cost_usd,
                                           max_input_tokens=max_input_tokens,max_output_tokens=max_output_tokens,
                                           volatile_context=volatile_context)]
-        from agentlab.models.siwc_responses import ChatGPTResponsesAdapter
+        from models.siwc_responses import ChatGPTResponsesAdapter
         provisional_body = {"model": "gpt-6-luna",
                             "input": [ChatGPTResponsesAdapter._tools(tool_definitions or []),
                                       *ChatGPTResponsesAdapter._input(provisional)],

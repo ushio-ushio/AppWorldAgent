@@ -3,11 +3,11 @@ import json
 
 import pytest
 
-from agentlab.memory.store import ObservationStore
-from agentlab.context_engineering.unified import UnifiedContextBuilder, UnifiedContextConfig
-from agentlab.runtime.task_state import TaskState
-from agentlab.context_engineering.compaction import TrajectoryCompactor
-from agentlab.memory.store import WorkingMemory
+from memory.store import ObservationStore
+from context_engineering.unified import UnifiedContextBuilder, UnifiedContextConfig
+from runtime.task_state import TaskState
+from context_engineering.compaction import TrajectoryCompactor
+from memory.store import WorkingMemory
 
 
 def add_exchange(store, messages, step, name, args, outcome):

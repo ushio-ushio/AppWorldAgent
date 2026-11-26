@@ -9,29 +9,29 @@ from time import perf_counter
 from typing import Any, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from agentlab.agent.planner import one_shot_plan
-from agentlab.agent.prompt import ContextManager
-from agentlab.context_engineering.dynamic import DynamicContextBuilder
-from agentlab.memory.store import ObservationStore
-from agentlab.context_engineering.context import CacheFirstContextBuilder
-from agentlab.context_engineering.unified import UnifiedContextBuilder, UnifiedContextConfig
-from agentlab.environments.appworld import AppWorldTool
-from agentlab.execution_assurance.recovery import (
+from agent.planner import one_shot_plan
+from agent.prompt import ContextManager
+from context_engineering.dynamic import DynamicContextBuilder
+from memory.store import ObservationStore
+from context_engineering.context import CacheFirstContextBuilder
+from context_engineering.unified import UnifiedContextBuilder, UnifiedContextConfig
+from environments.appworld import AppWorldTool
+from execution_assurance.recovery import (
     _correction_recovered, _documented_readback_only, _executed_write_fingerprints,
     _failed_python_action, _guard_blocking_correction, _has_unresolved_business_error,
     _local_correction, _same_target_readback, _safe_during_uncertain_write,
 )
-from agentlab.execution_assurance.completion_guard import CompletionGuard, batch_set_difference
-from agentlab.execution_assurance.assurance import (
+from execution_assurance.completion_guard import CompletionGuard, batch_set_difference
+from execution_assurance.assurance import (
     RequesterBoundary, make_assurance, pagination_hints, RequesterEventParser,
 )
-from agentlab.execution_assurance.reflection import TerminalReflection, read_only_probe_feedback, repair_feedback
-from agentlab.execution_assurance.reflection_v2 import TerminalAudit, audit_feedback
-from agentlab.memory.store import WorkingMemory
-from agentlab.runtime.task_state import TaskState
-from agentlab.runtime.trace import TraceLogger, _zero_usage, _add_usage
-from agentlab.models.siwc_responses import SIWCContextOverflowError
-from agentlab.tool_engineering.tools import ApiRetriever, app_capability_catalog
+from execution_assurance.reflection import TerminalReflection, read_only_probe_feedback, repair_feedback
+from execution_assurance.reflection_v2 import TerminalAudit, audit_feedback
+from memory.store import WorkingMemory
+from runtime.task_state import TaskState
+from runtime.trace import TraceLogger, _zero_usage, _add_usage
+from models.siwc_responses import SIWCContextOverflowError
+from tool_engineering.tools import ApiRetriever, app_capability_catalog
 
 
 class AgentState(TypedDict, total=False):

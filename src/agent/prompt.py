@@ -1,7 +1,7 @@
 """Build the task prompt for the Function Calling ReAct agent."""
 from __future__ import annotations
 
-from agentlab.context_engineering.unified import UnifiedContextConfig
+from context_engineering.unified import UnifiedContextConfig
 
 
 class ContextManager:

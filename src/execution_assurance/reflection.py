@@ -6,8 +6,8 @@ import json
 from time import perf_counter
 from typing import Any
 
-from agentlab.runtime.trace import _add_usage, _redact, _zero_usage
-from agentlab.execution_assurance.reflection_v2 import deterministic_answer_gap, submission_value
+from runtime.trace import _add_usage, _redact, _zero_usage
+from execution_assurance.reflection_v2 import deterministic_answer_gap, submission_value
 
 
 REFLECTION_TOOL = [{

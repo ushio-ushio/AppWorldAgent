@@ -3,15 +3,15 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
-from agentlab.environments.appworld import AppWorldTool
-from agentlab.execution_assurance.recovery import (
+from environments.appworld import AppWorldTool
+from execution_assurance.recovery import (
     _correction_recovered,
     _executed_write_fingerprints,
     _local_correction,
     _safe_during_uncertain_write,
     _same_target_readback,
 )
-from agentlab.memory.store import ObservationStore
+from memory.store import ObservationStore
 
 
 class Retriever:

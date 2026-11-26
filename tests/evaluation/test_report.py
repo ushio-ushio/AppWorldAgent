@@ -1,4 +1,4 @@
-from agentlab.evaluation.report import parse_report_counts
+from evaluation.report import parse_report_counts
 
 
 def test_parse_appworld_evaluator_counts():

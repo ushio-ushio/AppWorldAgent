@@ -7,9 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
-from agentlab.models import siwc_auth
-from agentlab.models.siwc_responses import ChatGPTResponsesAdapter, SIWCError, SIWCTransportError
-from agentlab.agent.react import LangGraphAgent
+import models.siwc_auth as siwc_auth
+from models.siwc_responses import ChatGPTResponsesAdapter, SIWCError, SIWCTransportError
+from agent.react import LangGraphAgent
 
 
 class FakeResponse:
@@ -55,8 +55,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.connect_timeout_seconds = 2
         adapter.max_transport_retries = 3
         adapter._session = Mock()
-        with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"), \
+        with patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"), \
                 patch.object(adapter, "_rebuild_session"):
             adapter._session.request.side_effect = requests.exceptions.ProxyError("secret-detail")
             with self.assertRaisesRegex(SIWCError, "ProxyError") as caught:
@@ -74,8 +74,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.connect_timeout_seconds = 2
         adapter.max_transport_retries = 3
         adapter._session = Mock()
-        with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"), \
+        with patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"), \
                 patch.object(adapter, "_rebuild_session"):
             adapter._session.request.side_effect = requests.exceptions.ConnectTimeout("secret-detail")
             with self.assertRaises(SIWCTransportError) as caught:
@@ -119,7 +119,7 @@ class TestSIWCLimitHandling(unittest.TestCase):
             return response
         with patch.object(adapter, "_request", side_effect=partial_request), \
                 patch.object(adapter, "_rebuild_session"), \
-                patch("agentlab.models.siwc_responses.time.sleep"):
+                patch("models.siwc_responses.time.sleep"):
             with tempfile.TemporaryDirectory() as directory:
                 trace_path = Path(directory) / "trace.jsonl"
                 world = FakeWorld()
@@ -143,7 +143,7 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.timeout_seconds = 1
         adapter.connect_timeout_seconds = 2
         adapter._session = Mock()
-        with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
+        with patch("models.siwc_responses.access_token", return_value="fake-token"), \
                 patch.object(adapter._session, "request", return_value=response) as request:
             with self.assertRaisesRegex(SIWCError, "usage limit reached"):
                 adapter._request("POST", "/responses", body={"model": "fake"})
@@ -157,8 +157,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.connect_timeout_seconds = 2
         adapter.max_transport_retries = 3
         adapter._session = Mock()
-        with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"), \
+        with patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"), \
                 patch.object(adapter._session, "request", return_value=response) as request:
             with self.assertRaisesRegex(SIWCError, "quota/rate limit reached"):
                 adapter._request("POST", "/responses", body={"model": "fake"})
@@ -168,10 +168,10 @@ class TestSIWCLimitHandling(unittest.TestCase):
     def test_adapter_reuses_one_session_and_closes_it(self):
         response = FakeResponse({})
         response.status_code = 200
-        with patch("agentlab.models.siwc_responses.requests.Session") as factory, \
+        with patch("models.siwc_responses.requests.Session") as factory, \
                 patch.object(ChatGPTResponsesAdapter, "list_models",
                              return_value=[{"slug": "fake"}]), \
-                patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"):
+                patch("models.siwc_responses.access_token", return_value="fake-token"):
             adapter = ChatGPTResponsesAdapter("fake", connect_timeout_seconds=20)
             factory.return_value.request.return_value = response
             assert adapter._request("POST", "/responses") is response
@@ -191,8 +191,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter._session = Mock()
         adapter._session.request.side_effect = [
             FakeResponse({}, status_code=504), FakeStreamResponse([completed_event()])]
-        with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"):
+        with patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"):
             message, usage = adapter.generate_tool_calls([], [], tool_choice="required")
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "search_api")
         self.assertEqual(usage["input_tokens"], 3)
@@ -211,9 +211,9 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.connect_timeout_seconds = 2
         adapter._session = first
         first.request.side_effect = requests.exceptions.SSLError("tls detail")
-        with patch("agentlab.models.siwc_responses.requests.Session", return_value=second) as factory, \
-                patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"):
+        with patch("models.siwc_responses.requests.Session", return_value=second) as factory, \
+                patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"):
             message, _usage = adapter.generate_tool_calls([], [])
         factory.assert_called_once()
         first.close.assert_called_once()
@@ -240,9 +240,9 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.timeout_seconds = 1
         adapter.connect_timeout_seconds = 2
         adapter._session = first
-        with patch("agentlab.models.siwc_responses.requests.Session", return_value=second), \
-                patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"):
+        with patch("models.siwc_responses.requests.Session", return_value=second), \
+                patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"):
             message, _usage = adapter.generate_tool_calls([], [])
         self.assertTrue(interrupted.closed)
         self.assertTrue(final.closed)
@@ -264,9 +264,9 @@ class TestSIWCLimitHandling(unittest.TestCase):
         adapter.timeout_seconds = 1
         adapter.connect_timeout_seconds = 2
         adapter._session = first
-        with patch("agentlab.models.siwc_responses.requests.Session", return_value=second), \
-                patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"):
+        with patch("models.siwc_responses.requests.Session", return_value=second), \
+                patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"):
             message, _usage = adapter.generate_tool_calls([], [])
         self.assertTrue(incomplete.closed)
         self.assertEqual(message["tool_calls"][0]["id"], "call-1")
@@ -283,8 +283,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
             FakeResponse({"error": {"code": "slow_down"}}, status_code=429,
                          headers={"Retry-After": "60"}),
             FakeStreamResponse([completed_event()])]
-        with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep") as sleep:
+        with patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep") as sleep:
             adapter.generate_tool_calls([], [])
         sleep.assert_called_once_with(15.0)
         self.assertEqual(adapter.last_transport["transport_retries"][0]["backoff_ms"], 15000)
@@ -298,8 +298,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
                 adapter.max_transport_retries = 3
                 adapter._session = Mock()
                 adapter._session.request.return_value = FakeResponse({}, status_code=status)
-                with patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                        patch("agentlab.models.siwc_responses.time.sleep"):
+                with patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                        patch("models.siwc_responses.time.sleep"):
                     with self.assertRaises(SIWCError):
                         adapter._request("POST", "/responses", body={})
                 self.assertEqual(adapter._session.request.call_count, 1)
@@ -313,9 +313,9 @@ class TestSIWCLimitHandling(unittest.TestCase):
         exc = requests.exceptions.ProxyError("local proxy denied")
         exc.__cause__ = PermissionError(10013, "socket denied")
         adapter._session.request.side_effect = exc
-        with patch("agentlab.models.siwc_responses.requests.Session") as factory, \
-                patch("agentlab.models.siwc_responses.access_token", return_value="fake-token"), \
-                patch("agentlab.models.siwc_responses.time.sleep"):
+        with patch("models.siwc_responses.requests.Session") as factory, \
+                patch("models.siwc_responses.access_token", return_value="fake-token"), \
+                patch("models.siwc_responses.time.sleep"):
             with self.assertRaises(SIWCTransportError) as caught:
                 adapter._request("POST", "/responses", body={})
         self.assertEqual(adapter._session.request.call_count, 1)
@@ -333,8 +333,8 @@ class TestSIWCLimitHandling(unittest.TestCase):
                 names.append(Path(source).name)
                 original_replace(source, target)
 
-            with patch("agentlab.models.siwc_auth._protect", side_effect=lambda data, decrypt=False: data), \
-                    patch("agentlab.models.siwc_auth.os.replace", side_effect=replace):
+            with patch("models.siwc_auth._protect", side_effect=lambda data, decrypt=False: data), \
+                    patch("models.siwc_auth.os.replace", side_effect=replace):
                 store.save({"test": True})
             self.assertRegex(names[0], r"siwc\.dat\.tmp\.\d+\.[0-9a-f]+")
             self.assertEqual(list(Path(directory).glob("*.tmp.*")), [])
@@ -348,7 +348,7 @@ class TestSIWCLimitHandling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = siwc_auth.CredentialStore(Path(directory) / "siwc.dat")
             with patch.object(store, "load", side_effect=[expired, refreshed]), \
-                    patch("agentlab.models.siwc_auth._token_request") as request:
+                    patch("models.siwc_auth._token_request") as request:
                 result = siwc_auth.access_token(store)
         self.assertEqual(result, "fresh-access")
         request.assert_not_called()

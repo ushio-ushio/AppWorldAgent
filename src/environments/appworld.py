@@ -5,14 +5,14 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from agentlab.execution_assurance.assurance import RequesterEventParser
-from agentlab.execution_assurance.recovery import (
+from execution_assurance.assurance import RequesterEventParser
+from execution_assurance.recovery import (
     _local_correction, _persistent_python_names, _safe_during_uncertain_write,
     _same_target_readback, _correction_recovered, _executed_write_fingerprints,
     write_operation_fingerprints,
 )
-from agentlab.runtime.trace import _redact as redact
-from agentlab.tool_engineering.tools import ApiRetriever, ToolRegistry
+from runtime.trace import _redact as redact
+from tool_engineering.tools import ApiRetriever, ToolRegistry
 
 
 class AppWorldTool:

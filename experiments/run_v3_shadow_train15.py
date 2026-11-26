@@ -15,7 +15,7 @@ from datetime import datetime
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from agentlab.evaluation.report import parse_report_counts
+from evaluation.report import parse_report_counts
 
 
 CONFIG = json.loads(
@@ -114,8 +114,8 @@ def main() -> None:
                         default=CONFIG["execution_assurance_mode"])
     args = parser.parse_args()
     from appworld import load_task_ids
-    from agentlab.models.siwc_auth import access_token
-    from agentlab.models.siwc_responses import ChatGPTResponsesAdapter
+    from models.siwc_auth import access_token
+    from models.siwc_responses import ChatGPTResponsesAdapter
 
     if len(TASKS) != 15 or not set(TASKS) <= set(load_task_ids("train")):
         raise RuntimeError("Invalid frozen Train-15 task list")

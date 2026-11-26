@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from agentlab.memory.store import ObservationStore
+from memory.store import ObservationStore
 
 
 @dataclass

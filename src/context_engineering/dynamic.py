@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agentlab.memory.store import ObservationStore
+from memory.store import ObservationStore
 
 
 class DynamicContextBuilder:

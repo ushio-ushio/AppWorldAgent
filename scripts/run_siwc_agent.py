@@ -11,12 +11,13 @@ import sys
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 os.environ["APPWORLD_ROOT"] = str(Path(os.getenv("APPWORLD_ROOT", ROOT / "vendor" / "appworld")))
 os.environ.setdefault("APPWORLD_CACHE", str(Path(os.environ["APPWORLD_ROOT"]) / ".tmp" / "agent-cache"))
 
-from agentlab.context_engineering.unified import UnifiedContextConfig  # noqa: E402
-from agentlab.agent.react import LangGraphAgent  # noqa: E402
-from agentlab.models.siwc_responses import ChatGPTResponsesAdapter  # noqa: E402
+from context_engineering.unified import UnifiedContextConfig  # noqa: E402
+from agent.react import LangGraphAgent  # noqa: E402
+from models.siwc_responses import ChatGPTResponsesAdapter  # noqa: E402
 from appworld import AppWorld, load_task_ids  # noqa: E402
 
 

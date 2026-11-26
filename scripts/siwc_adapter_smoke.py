@@ -1,5 +1,11 @@
 """Verify the production SIWC adapter's Function Calling message shape."""
-from agentlab.models.siwc_responses import ChatGPTResponsesAdapter
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from models.siwc_responses import ChatGPTResponsesAdapter
 
 model = ChatGPTResponsesAdapter("gpt-6-luna")
 tools = [{"type": "function", "function": {"name": "fake_lookup",

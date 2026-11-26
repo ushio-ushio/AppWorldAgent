@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from agentlab.execution_assurance.assurance import (
+from execution_assurance.assurance import (
     ActionGateBlocked, GoalStatus, OperationType, OutcomeGate, RequesterBoundary,
     GoalTracker, RequesterEventParser, classify_operation,
 )
-from agentlab.execution_assurance.completion_guard import CompletionGuard
-from agentlab.environments.appworld import AppWorldTool
+from execution_assurance.completion_guard import CompletionGuard
+from environments.appworld import AppWorldTool
 
 
 class FakeRequester:

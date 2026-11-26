@@ -13,7 +13,7 @@ import pytest
 def test_non_gbk_output_does_not_poison_later_api_calls():
     assert sys.flags.utf8_mode == 1, "PYTHONUTF8=1 must be set before Python starts"
     from appworld import AppWorld
-    from agentlab.models.siwc_responses import _wall_seconds
+    from models.siwc_responses import _wall_seconds
 
     started = _wall_seconds()
     with AppWorld(task_id="82e2fac_1", experiment_name=f"agentlab_utf8_regression_{uuid4().hex[:8]}") as world:

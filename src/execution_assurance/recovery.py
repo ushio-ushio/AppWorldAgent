@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from agentlab.tool_engineering.tools import ApiRetriever, compact_api_schema
+from tool_engineering.tools import ApiRetriever, compact_api_schema
 
 
 def _failed_python_action(raw_arguments: Any) -> tuple[str, str | None]:

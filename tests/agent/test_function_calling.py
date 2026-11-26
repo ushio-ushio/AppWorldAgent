@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentlab.agent.react import LangGraphAgent
+from agent.react import LangGraphAgent
 
 
 def tool_call(call_id, name, arguments):

@@ -3,14 +3,14 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 
-from agentlab.agent.prompt import ContextManager
-from agentlab.agent.react import LangGraphAgent
-from agentlab.context_engineering.compaction import EpochCompactor, TrajectoryCompactor
-from agentlab.context_engineering.context import CacheFirstContextBuilder, CacheFirstContextConfig, TokenMeter
-from agentlab.context_engineering.extraction import AsyncContextExtractor
-from agentlab.context_engineering.dynamic import DynamicContextBuilder
-from agentlab.memory.store import ObservationStore
-from agentlab.models.siwc_responses import ChatGPTResponsesAdapter
+from agent.prompt import ContextManager
+from agent.react import LangGraphAgent
+from context_engineering.compaction import EpochCompactor, TrajectoryCompactor
+from context_engineering.context import CacheFirstContextBuilder, CacheFirstContextConfig, TokenMeter
+from context_engineering.extraction import AsyncContextExtractor
+from context_engineering.dynamic import DynamicContextBuilder
+from memory.store import ObservationStore
+from models.siwc_responses import ChatGPTResponsesAdapter
 
 
 TOOLS = [{
@@ -389,7 +389,7 @@ def test_soft_watermark_submits_clone_before_compaction_and_counts_fallback():
 def test_level3_consolidates_shards_and_preserves_evidence():
     store=ObservationStore("master")
     compactor=EpochCompactor(store)
-    from agentlab.context_engineering.compaction import CheckpointShard
+    from context_engineering.compaction import CheckpointShard
     compactor.shards=[CheckpointShard(f"CP-{i:02d}",(1+(i-1)*2,i*2),
         ({"api":f"app.write{i}","status":"succeeded","evidence_ref":f"obs{i}"},),
         ({"obs_id":f"obs{i}"},),f"old narrative {i}"*100,
@@ -405,7 +405,7 @@ def test_level3_consolidates_shards_and_preserves_evidence():
 
 
 def test_replay_reports_lcp_cache_and_compaction_counts():
-    from agentlab.context_engineering.replay import analyze_trace
+    from context_engineering.replay import analyze_trace
     rows=[{"event":"context_view","step":1,"cache_first":{"lcp_chars":0,"lcp_ratio":0,"cached_tokens":0,"compact_level":0}},
           {"event":"context_view","step":2,"cache_first":{"lcp_chars":8,"lcp_ratio":.8,"cached_tokens":2,"compact_level":3,"extraction":{"triggers":1}}},
           {"event":"overflow_recovery","step":2}]
@@ -418,7 +418,7 @@ def test_replay_reports_lcp_cache_and_compaction_counts():
 def test_clone_incremental_throttle_requires_group_and_token_growth():
     class Model:
         def extract_context(self,messages,tools=None): return ({}, {})
-    from agentlab.context_engineering.extraction import AsyncContextExtractor
+    from context_engineering.extraction import AsyncContextExtractor
     extractor=AsyncContextExtractor(Model())
     assert extractor.submit([{"role":"user","content":"x"}],total_groups=5,estimated_tokens=12000)
     assert not extractor.submit([{"role":"user","content":"x"}],total_groups=8,estimated_tokens=20000)
@@ -434,7 +434,7 @@ def test_clone_incremental_throttle_requires_group_and_token_growth():
 
 
 def test_react_replays_same_step_after_context_overflow():
-    from agentlab.models.siwc_responses import SIWCContextOverflowError
+    from models.siwc_responses import SIWCContextOverflowError
     class OverflowModel(_FakeModel):
         def __init__(self):
             super().__init__(); self.failed_once=False

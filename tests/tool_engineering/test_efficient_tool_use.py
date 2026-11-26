@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentlab.agent.react import LangGraphAgent
-from agentlab.agent.prompt import ContextManager
-from agentlab.tool_engineering.tools import ApiRetriever, compact_api_schema
-from agentlab.execution_assurance.recovery import write_operation_fingerprints
+from agent.react import LangGraphAgent
+from agent.prompt import ContextManager
+from tool_engineering.tools import ApiRetriever, compact_api_schema
+from execution_assurance.recovery import write_operation_fingerprints
 
 
 class BatchWorld:

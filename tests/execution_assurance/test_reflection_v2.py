@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agentlab.execution_assurance.reflection_v2 import (
+from execution_assurance.reflection_v2 import (
     AUDITOR_SYSTEM_PROMPT, TerminalAudit, audit_feedback, build_audit_context,
     deterministic_answer_gap,
 )
-from agentlab.environments.appworld import AppWorldTool
+from environments.appworld import AppWorldTool
 
 
 class Trace:
